@@ -10,7 +10,7 @@ from werkzeug.utils import secure_filename
 from beautifier import beautify_workbook
 
 
-ALLOWED_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
+ALLOWED_EXTENSIONS = {".pdf", ".xls", ".xlsx", ".xlsm"}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "excel-bonito-secret"
@@ -30,11 +30,11 @@ def upload_file():
     uploaded_file = request.files.get("file")
 
     if uploaded_file is None or uploaded_file.filename == "":
-        flash("Selecione um arquivo Excel para continuar.")
+        flash("Selecione um arquivo PDF ou Excel para continuar.")
         return redirect(url_for("index"))
 
     if not is_allowed_file(uploaded_file.filename):
-        flash("Envie um arquivo .xls, .xlsx ou .xlsm.")
+        flash("Envie um arquivo .pdf, .xls, .xlsx ou .xlsm.")
         return redirect(url_for("index"))
 
     original_name = secure_filename(uploaded_file.filename)
