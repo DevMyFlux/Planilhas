@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Excel Bonito</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <section class="hero-card">
+            <p class="eyebrow">Melhoria automática de planilhas</p>
+            <h1>Envie seu Excel e receba uma versão organizada, limpa e bonita.</h1>
+            <p class="lead">
+                O sistema ajusta cabeçalhos, melhora a leitura dos dados, aplica estilo profissional
+                e devolve a planilha pronta para apresentar ou compartilhar.
+            </p>
+
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    <div class="alert">
+                        {% for message in messages %}
+                            <p>{{ message }}</p>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            <form class="upload-card" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+                <label class="dropzone" for="file">
+                    <span class="dropzone-title">Escolher arquivo Excel</span>
+                    <span class="dropzone-subtitle">Formatos aceitos: .xls, .xlsx e .xlsm</span>
+                    <input id="file" name="file" type="file" accept=".xls,.xlsx,.xlsm" required>
+                </label>
+                <button type="submit">Organizar minha planilha</button>
+            </form>
+        </section>
+
+        <section class="feature-grid">
+            <article>
+                <h2>O que melhora</h2>
+                <p>Leitura do arquivo, remocao de linhas vazias, reconstrução dos lancamentos e tabela final padronizada.</p>
+            </article>
+            <article>
+                <h2>Visual profissional</h2>
+                <p>Linhas alternadas, destaque para totais e uma aparencia pronta para reuniao ou cliente.</p>
+            </article>
+            <article>
+                <h2>Processo simples</h2>
+                <p>Voce envia a planilha, o sistema organiza em Data, Descricao, Debito, Credito e Saldo, e devolve o arquivo.</p>
+            </article>
+        </section>
+    </main>
+</body>
+</html>
