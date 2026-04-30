@@ -14,34 +14,29 @@ import pdfplumber
 import xlrd
 
 
+# ── HCN output headers ──────────────────────────────────────────────────────
+BALANCETE_HCN_HEADERS = [
+    "REG", "ContaContabil", "NomeConta", "SaldoAnterior",
+    "Debito", "Credito", "SaldoAtual",
+    "Estoque", "AtivoImob", "DepreciacaoAcumulativa",
+    "ContaFinanceira", "ReservaDeContigencia", "Centro de Custos",
+]
+DIARIO_HCN_HEADERS = [
+    "REG", "DATA", "CLASSIFICACAO", "DESCRICAO",
+    "HISTORICO", "DEBITO", "CREDITO", "Centro de Custos",
+]
+RAZAO_HCN_HEADERS = [
+    "REG", "NOME CONTA", "CONTA CONTABIL", "DATA",
+    "SALDO ANTERIOR", "HISTORICO", "DEBITO", "CREDITO", "Saldo", "Contra Partida",
+]
+
+# Legacy headers kept for backward-compat fallback paths
 DEFAULT_OUTPUT_HEADERS = ["Data", "Descricao", "Debito", "Credito", "Saldo"]
-BALANCETE_HEADERS = [
-    "Red",
-    "Conta",
-    "Descricao",
-    "Saldo Anterior",
-    "Debito",
-    "Credito",
-    "Saldo Atual",
-]
-DIARIO_HEADERS = [
-    "Lote",
-    "Nr Mvto",
-    "Conta Debito",
-    "Conta Credito",
-    "Historico",
-    "Debito",
-    "Credito",
-]
-RAZAO_HEADERS = [
-    "Conta Analitica",
-    "Data",
-    "Historico",
-    "Contrapartida",
-    "Debito",
-    "Credito",
-    "Saldo",
-]
+BALANCETE_HEADERS = BALANCETE_HCN_HEADERS  # alias
+DIARIO_HEADERS = DIARIO_HCN_HEADERS
+RAZAO_HEADERS = RAZAO_HCN_HEADERS
+
+# ── Styles ───────────────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ALT_ROW_FILL = PatternFill("solid", fgColor="F4F8FB")
@@ -55,8 +50,24 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9E2F3"),
     bottom=Side(style="thin", color="D9E2F3"),
 )
+
+# ── Regexes ──────────────────────────────────────────────────────────────────
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
-MONEY_RE = re.compile(r"^-?\s*(?:R\$\s*)?\d{1,3}(?:\.\d{3})*,\d{2}$|^-?\s*(?:R\$\s*)?\d+,\d{2}$")
+MONEY_RE = re.compile(
+    r"^-?\s*(?:R\$\s*)?\d{1,3}(?:\.\d{3})*,\d{2}$"
+    r"|^-?\s*(?:R\$\s*)?\d+,\d{2}$"
+)
+ACCOUNT_RE = re.compile(r"^([\d]+)\s+([\d.]+)\s*-\s*(.+)$")
+CONTRA_RE = re.compile(r"^(\d+)\s*-\s*([\d.].*)$")
+
+# ── Portuguese month names (normalised, no accents) ──────────────────────────
+PT_MONTHS: dict[str, str] = {
+    "janeiro": "01", "fevereiro": "02", "marco": "03",
+    "abril": "04", "maio": "05", "junho": "06", "julho": "07",
+    "agosto": "08", "setembro": "09", "outubro": "10",
+    "novembro": "11", "dezembro": "12",
+}
+
 HEADER_ALIASES = {
     "date": {"data", "dt"},
     "description": {"historico", "descricao", "descricao historico", "complemento", "detalhe"},
@@ -65,6 +76,10 @@ HEADER_ALIASES = {
     "saldo": {"saldo", "saldo final"},
 }
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Public entry point
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def beautify_workbook(file_stream: BytesIO, input_extension: str = ".xlsx") -> BytesIO:
     if input_extension == ".pdf":
@@ -79,14 +94,17 @@ def beautify_workbook(file_stream: BytesIO, input_extension: str = ".xlsx") -> B
         if not parsed_sheet:
             continue
 
-        output_sheet = output_workbook.create_sheet(title=build_sheet_title(original_title, created_sheets))
+        output_sheet = output_workbook.create_sheet(
+            title=build_sheet_title(original_title, created_sheets)
+        )
         write_records(output_sheet, parsed_sheet)
         style_output_sheet(output_sheet, parsed_sheet, created_sheets)
         created_sheets += 1
 
     if created_sheets == 0:
         raise ValueError(
-            "Nao encontrei lancamentos no formato esperado. Se quiser, me envie um exemplo desse Excel para eu ajustar o parser."
+            "Nao encontrei lancamentos no formato esperado. "
+            "Se quiser, me envie um exemplo desse Excel para eu ajustar o parser."
         )
 
     output = BytesIO()
@@ -99,14 +117,17 @@ def beautify_pdf(file_stream: BytesIO) -> BytesIO:
     parsed_documents = parse_pdf_documents(file_stream)
     if not parsed_documents:
         raise ValueError(
-            "Nao consegui interpretar esse PDF ainda. Se ele for exportado do sistema contabil, me envie o arquivo que eu ajusto o layout."
+            "Nao consegui interpretar esse PDF ainda. "
+            "Se ele for exportado do sistema contabil, me envie o arquivo que eu ajusto o layout."
         )
 
     output_workbook = Workbook()
     output_workbook.remove(output_workbook.active)
 
     for sheet_index, (title, parsed_sheet) in enumerate(parsed_documents):
-        output_sheet = output_workbook.create_sheet(title=build_sheet_title(title, sheet_index))
+        output_sheet = output_workbook.create_sheet(
+            title=build_sheet_title(title, sheet_index)
+        )
         write_records(output_sheet, parsed_sheet)
         style_output_sheet(output_sheet, parsed_sheet, sheet_index)
 
@@ -116,65 +137,292 @@ def beautify_pdf(file_stream: BytesIO) -> BytesIO:
     return output
 
 
-def parse_pdf_documents(file_stream: BytesIO) -> list[tuple[str, dict[str, object]]]:
+# ═══════════════════════════════════════════════════════════════════════════════
+# PDF parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_pdf_documents(file_stream: BytesIO) -> list[tuple[str, dict]]:
     file_stream.seek(0)
     with pdfplumber.open(file_stream) as pdf:
         first_page_text = pdf.pages[0].extract_text() or ""
-        normalized_text = normalize_text(first_page_text)
+        norm = normalize_text(first_page_text)
 
-        if "balancete" in normalized_text:
+        if "balancete" in norm:
             rows = parse_balancete_pdf(pdf)
             if rows:
-                return [("BalancetePDF", build_parsed_sheet(BALANCETE_HEADERS, rows))]
+                return [("BalancetePDF", _balancete_sheet(rows))]
 
-        if "diario geral" in normalized_text or "diario" in normalized_text:
+        if "diario geral" in norm or "diario" in norm:
             rows = parse_diario_pdf(pdf)
             if rows:
-                return [("DiarioPDF", build_parsed_sheet(DIARIO_HEADERS, rows))]
+                return [("DiarioPDF", _diario_sheet(rows))]
 
-        if "razao contabil" in normalized_text or "razao" in normalized_text:
+        if "razao contabil" in norm or "razao" in norm:
             rows = parse_razao_pdf(pdf)
             if rows:
-                return [("RazaoPDF", build_parsed_sheet(RAZAO_HEADERS, rows))]
+                return [("RazaoPDF", _razao_sheet(rows))]
 
     return []
 
 
-def build_parsed_sheet(headers: list[str], rows: list[dict[str, object]]) -> dict[str, object]:
-    if headers == BALANCETE_HEADERS:
-        return {
-            "headers": headers,
-            "rows": rows,
-            "date_columns": set(),
-            "money_columns": {4, 5, 6, 7},
-            "description_column": 3,
-        }
-    if headers == DIARIO_HEADERS:
-        return {
-            "headers": headers,
-            "rows": rows,
-            "date_columns": set(),
-            "money_columns": {6, 7},
-            "description_column": 5,
-        }
-    if headers == RAZAO_HEADERS:
-        return {
-            "headers": headers,
-            "rows": rows,
-            "date_columns": {2},
-            "money_columns": {5, 6, 7},
-            "description_column": 3,
-        }
+def _balancete_sheet(rows: list[dict]) -> dict:
     return {
-        "headers": headers,
+        "headers": BALANCETE_HCN_HEADERS,
         "rows": rows,
-        "date_columns": {1},
-        "money_columns": {3, 4, 5},
-        "description_column": 2,
+        "date_columns": set(),
+        "money_columns": {4, 5, 6, 7},
+        "description_column": 3,
     }
 
 
-def extract_records(rows: list[tuple]) -> dict[str, object] | None:
+def _diario_sheet(rows: list[dict]) -> dict:
+    return {
+        "headers": DIARIO_HCN_HEADERS,
+        "rows": rows,
+        "date_columns": set(),
+        "money_columns": {6, 7},
+        "description_column": 5,
+    }
+
+
+def _razao_sheet(rows: list[dict]) -> dict:
+    return {
+        "headers": RAZAO_HCN_HEADERS,
+        "rows": rows,
+        "date_columns": set(),
+        "money_columns": {5, 7, 8, 9},
+        "description_column": 6,
+    }
+
+
+# ── PDF page helpers ──────────────────────────────────────────────────────────
+
+def parse_balancete_pdf(pdf) -> list[dict]:
+    """Parse TOTVS Balancete PDF lines.
+
+    Line format (no Red column):
+      CONTA  DESCRICAO  SALDO_ANTERIOR[D|C]  DEBITO  CREDITO  SALDO_ATUAL[D|C]
+    """
+    rows: list[dict] = []
+    _money = r"-?\d{1,3}(?:\.\d{3})*,\d{2}"
+    pattern = re.compile(
+        r"^(?P<conta>\d[\d.]*)\s+"
+        r"(?P<descricao>.+?)\s+"
+        r"(?P<saldo_anterior>" + _money + r")[DC]?\s+"
+        r"(?P<debito>" + _money + r")\s+"
+        r"(?P<credito>" + _money + r")\s+"
+        r"(?P<saldo_atual>" + _money + r")[DC]?$"
+    )
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+        for line in text.splitlines():
+            m = pattern.match(normalize_spaces(line))
+            if not m:
+                continue
+            rows.append({
+                "REG": "0300",
+                "ContaContabil": m.group("conta"),
+                "NomeConta": m.group("descricao"),
+                "SaldoAnterior": parse_money_value(m.group("saldo_anterior")),
+                "Debito": parse_money_value(m.group("debito")),
+                "Credito": parse_money_value(m.group("credito")),
+                "SaldoAtual": parse_money_value(m.group("saldo_atual")),
+                "Estoque": "N",
+                "AtivoImob": "N",
+                "DepreciacaoAcumulativa": "N",
+                "ContaFinanceira": "N",
+                "ReservaDeContigencia": "N",
+                "Centro de Custos": None,
+            })
+    return rows
+
+
+def parse_diario_pdf(pdf) -> list[dict]:
+    rows: list[dict] = []
+    current: dict | None = None
+
+    for page in pdf.pages:
+        line_map = extract_pdf_lines(page)
+        for _, words in line_map:
+            if not words:
+                continue
+            ordered = sorted(words, key=lambda item: item[0])
+            texts = [t for _, t in ordered]
+            first_text = texts[0]
+            line_text = " ".join(texts)
+            norm_line = normalize_text(line_text)
+
+            if (
+                first_text == "Lote"
+                or "diario" in norm_line
+                or "pagina:" in norm_line
+                or "periodo:" in norm_line
+                or "uruacu" in norm_line
+                or "hcn - hosp" in norm_line
+                or "total do dia:" in norm_line
+                or "total da empresa:" in norm_line
+                or "total geral:" in norm_line
+                or re.fullmatch(r"(?:-?\d{1,3}(?:\.\d{3})*,\d{2}\s*){1,3}", line_text.strip())
+                or "19.324.171/0008-70" in line_text
+                or "centro-norte goiano" in norm_line
+            ):
+                continue
+
+            if re.fullmatch(r"\d+", first_text) and len(ordered) >= 2 and re.match(r"^\d{8}", texts[1]):
+                if current is not None:
+                    rows.extend(_finalise_diario_pdf(current))
+
+                lote = first_text
+                nr_mvto, conta_debito_codigo = split_mvto_and_account(texts[1])
+                debit_tokens = [conta_debito_codigo] if conta_debito_codigo else []
+                debit_tokens.extend(t for x, t in ordered if 100 <= x < 200)
+                credit_tokens = [t for x, t in ordered if 200 <= x < 309]
+                historico_words = [t for x, t in ordered if 309 <= x < 470]
+                amount_values = [
+                    (x, parse_money_value(t))
+                    for x, t in ordered
+                    if x >= 470 and parse_money_value(t) is not None
+                ]
+
+                debito = credito = None
+                if len(amount_values) >= 2:
+                    debito = amount_values[0][1]
+                    credito = amount_values[-1][1]
+                elif len(amount_values) == 1:
+                    amount = amount_values[0][1]
+                    if bool(debit_tokens) and not bool(credit_tokens):
+                        debito = amount
+                    elif bool(credit_tokens) and not bool(debit_tokens):
+                        credito = amount
+                    elif amount_values[0][0] >= 535:
+                        credito = amount
+                    else:
+                        debito = amount
+
+                current = {
+                    "_lote": lote,
+                    "_nr_mvto": nr_mvto,
+                    "_conta_debito": " ".join(debit_tokens).strip(),
+                    "_conta_credito": " ".join(credit_tokens).strip(),
+                    "_historico": " ".join(historico_words).strip(),
+                    "_debito": debito,
+                    "_credito": credito,
+                    "_debito_desc": [],
+                    "_credito_desc": [],
+                    "_historico_extra": [],
+                }
+                continue
+
+            if current is None:
+                continue
+            if "emitido por:" in norm_line:
+                continue
+
+            for x, text in ordered:
+                if 100 <= x < 200:
+                    current["_debito_desc"].append(text)
+                elif 200 <= x < 309:
+                    current["_credito_desc"].append(text)
+                elif 309 <= x < 470:
+                    current["_historico_extra"].append(text)
+
+    if current is not None:
+        rows.extend(_finalise_diario_pdf(current))
+    return rows
+
+
+def _finalise_diario_pdf(c: dict) -> list[dict]:
+    conta_debito = clean_diario_account(
+        join_description(c["_conta_debito"], " ".join(c.pop("_debito_desc", [])))
+    )
+    conta_credito = clean_diario_account(
+        join_description(c["_conta_credito"], " ".join(c.pop("_credito_desc", [])))
+    )
+    historico = join_description(
+        c["_historico"], " ".join(c.pop("_historico_extra", []))
+    ) or "Sem historico"
+
+    rows: list[dict] = []
+    if conta_debito:
+        code, name = split_account_field(conta_debito)
+        rows.append({
+            "REG": 1600, "DATA": "", "CLASSIFICACAO": code, "DESCRICAO": name,
+            "HISTORICO": historico, "DEBITO": decimal_to_float(c["_debito"]),
+            "CREDITO": 0.0 if c["_debito"] is not None else None, "Centro de Custos": None,
+        })
+    if conta_credito:
+        code, name = split_account_field(conta_credito)
+        rows.append({
+            "REG": 1600, "DATA": "", "CLASSIFICACAO": code, "DESCRICAO": name,
+            "HISTORICO": historico, "DEBITO": None,
+            "CREDITO": decimal_to_float(c["_credito"]), "Centro de Custos": None,
+        })
+    return rows
+
+
+def parse_razao_pdf(pdf) -> list[dict]:
+    rows: list[dict] = []
+    current_account_name = ""
+    current_account_code = ""
+    current_saldo_anterior: Decimal | None = None
+    current_date = ""
+    pending_record: dict | None = None
+    money_pattern = r"-?\d{1,3}(?:\.\d{3})*,\d{2}"
+
+    for page in pdf.pages:
+        text = page.extract_text() or ""
+        for raw_line in text.splitlines():
+            line = normalize_spaces(raw_line)
+            if not line:
+                continue
+            if line.startswith("Conta Anal") and "tica:" in line:
+                m = re.search(r"Conta Anal[íi]tica:\s*(.+?)\s+Saldo Anterior:", line)
+                account_full = m.group(1).strip() if m else line.split(":", 1)[-1].strip()
+                current_account_code, current_account_name = parse_razao_account_header(account_full)
+                saldo_m = re.search(r"Saldo Anterior:\s*(" + money_pattern + r")", line)
+                current_saldo_anterior = parse_money_value(saldo_m.group(1)) if saldo_m else None
+                pending_record = None
+                continue
+            if line.startswith("Data ") or "Razão" in line or "Pagina:" in normalize_text(line):
+                continue
+            parsed_date = parse_date_value(line.split(" ")[0])
+            if parsed_date:
+                current_date = parsed_date
+                values = re.findall(money_pattern, line)
+                pending_record = {
+                    "REG": 1700,
+                    "NOME CONTA": current_account_name or "Sem conta",
+                    "CONTA CONTABIL": current_account_code or "",
+                    "DATA": current_date,
+                    "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
+                    "HISTORICO": "Sem historico",
+                    "DEBITO": decimal_to_float(parse_money_value(values[0])) if len(values) > 0 else None,
+                    "CREDITO": decimal_to_float(parse_money_value(values[1])) if len(values) > 1 else None,
+                    "Saldo": decimal_to_float(parse_money_value(values[2])) if len(values) > 2 else None,
+                    "Contra Partida": "",
+                }
+                rows.append(pending_record)
+                continue
+            if line.startswith("Contrapartida:"):
+                if pending_record is not None:
+                    contra = line.split(":", 1)[1].strip()
+                    mm = re.search(rf"\s+{money_pattern}\s+{money_pattern}\s+", contra)
+                    if mm:
+                        contra = contra[: mm.start()].strip()
+                    pending_record["Contra Partida"] = parse_razao_contra_code(contra)
+                continue
+            if pending_record is not None:
+                extra = line.strip()
+                if extra and normalize_text(pending_record["HISTORICO"]) in {"", "sem historico"}:
+                    pending_record["HISTORICO"] = extra
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# XLS / XLSX extraction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_records(rows: list[tuple]) -> dict | None:
     non_empty_rows = [list(row) for row in rows if not row_is_empty(row)]
     if not non_empty_rows:
         return None
@@ -184,7 +432,7 @@ def extract_records(rows: list[tuple]) -> dict[str, object] | None:
         balancete_rows = parse_balancete_rows(non_empty_rows, balancete)
         if balancete_rows:
             return {
-                "headers": BALANCETE_HEADERS,
+                "headers": BALANCETE_HCN_HEADERS,
                 "rows": balancete_rows,
                 "date_columns": set(),
                 "money_columns": {4, 5, 6, 7},
@@ -196,7 +444,7 @@ def extract_records(rows: list[tuple]) -> dict[str, object] | None:
         diario_rows = parse_diario_rows(non_empty_rows, diario)
         if diario_rows:
             return {
-                "headers": DIARIO_HEADERS,
+                "headers": DIARIO_HCN_HEADERS,
                 "rows": diario_rows,
                 "date_columns": set(),
                 "money_columns": {6, 7},
@@ -208,11 +456,11 @@ def extract_records(rows: list[tuple]) -> dict[str, object] | None:
         razao_rows = parse_razao_rows(non_empty_rows, razao)
         if razao_rows:
             return {
-                "headers": RAZAO_HEADERS,
+                "headers": RAZAO_HCN_HEADERS,
                 "rows": razao_rows,
-                "date_columns": {2},
-                "money_columns": {5, 6, 7},
-                "description_column": 3,
+                "date_columns": set(),
+                "money_columns": {5, 7, 8, 9},
+                "description_column": 6,
             }
 
     structured = detect_structured_layout(non_empty_rows)
@@ -254,12 +502,12 @@ def read_input_sheets(file_stream: BytesIO, input_extension: str) -> list[tuple[
             rows = []
             for row_index in range(sheet.nrows):
                 parsed_row = []
-                for column_index in range(sheet.ncols):
+                for col_index in range(sheet.ncols):
                     parsed_row.append(
                         convert_xls_cell(
                             workbook,
-                            sheet.cell_value(row_index, column_index),
-                            sheet.cell_type(row_index, column_index),
+                            sheet.cell_value(row_index, col_index),
+                            sheet.cell_type(row_index, col_index),
                         )
                     )
                 rows.append(tuple(parsed_row))
@@ -267,43 +515,42 @@ def read_input_sheets(file_stream: BytesIO, input_extension: str) -> list[tuple[
         return sheets
 
     workbook = load_workbook(file_stream, data_only=True, keep_vba=input_extension == ".xlsm")
-    return [(sheet.title, list(sheet.iter_rows(values_only=True))) for sheet in workbook.worksheets]
+    return [
+        (sheet.title, list(sheet.iter_rows(values_only=True)))
+        for sheet in workbook.worksheets
+    ]
 
 
 def read_pdf_sheets(file_stream: BytesIO) -> list[tuple[str, list[tuple]]]:
     file_stream.seek(0)
     rows: list[tuple] = []
-
     with pdfplumber.open(file_stream) as pdf:
-        for page_index, page in enumerate(pdf.pages, start=1):
+        for page in pdf.pages:
             page_rows = extract_rows_from_pdf_page(page)
             if page_rows:
                 rows.extend(page_rows)
             else:
-                text_rows = extract_rows_from_pdf_text(page)
-                rows.extend(text_rows)
-
+                rows.extend(extract_rows_from_pdf_text(page))
     return [("PDF_Convertido", rows)]
 
 
 def extract_rows_from_pdf_page(page) -> list[tuple]:
-    extracted_rows: list[tuple] = []
-    tables = page.extract_tables()
-    for table in tables:
+    extracted: list[tuple] = []
+    for table in page.extract_tables():
         for row in table:
             if not row:
                 continue
             cleaned = tuple(clean_pdf_cell(cell) for cell in row)
             if any(cleaned):
-                extracted_rows.append(cleaned)
-    return extracted_rows
+                extracted.append(cleaned)
+    return extracted
 
 
 def extract_rows_from_pdf_text(page) -> list[tuple]:
     text = page.extract_text() or ""
     rows: list[tuple] = []
     for line in text.splitlines():
-        parts = [segment.strip() for segment in re.split(r"\s{2,}", line) if segment.strip()]
+        parts = [s.strip() for s in re.split(r"\s{2,}", line) if s.strip()]
         if parts:
             rows.append(tuple(parts))
     return rows
@@ -313,326 +560,312 @@ def clean_pdf_cell(value: object) -> str:
     return normalize_spaces(value)
 
 
-def parse_balancete_pdf(pdf) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    pattern = re.compile(
-        r"^(?P<red>\d+)\s+"
-        r"(?P<conta>\d[\d\.]*)\s+"
-        r"(?P<descricao>.+?)\s+"
-        r"(?P<saldo_anterior>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<debito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
-    )
-    aux_pattern = re.compile(
-        r"^Conta\s*Aux\.?:\s*(?P<conta>\d+)\s*"
-        r"(?P<descricao>.+?)\s+"
-        r"(?P<saldo_anterior>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<debito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
-    )
-    summary_pattern = re.compile(
-        r"^(?P<saldo_anterior>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<debito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
-        r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# Layout detection
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    for page in pdf.pages:
-        text = page.extract_text() or ""
-        for line in text.splitlines():
-            normalized_line = normalize_spaces(line)
-            match = pattern.match(normalized_line)
-            if not match:
-                aux_match = aux_pattern.match(normalized_line)
-                if aux_match:
-                    rows.append(
-                        {
-                            "Red": "Conta Aux.",
-                            "Conta": aux_match.group("conta"),
-                            "Descricao": aux_match.group("descricao"),
-                            "Saldo Anterior": parse_money_value(aux_match.group("saldo_anterior")),
-                            "Debito": parse_money_value(aux_match.group("debito")),
-                            "Credito": parse_money_value(aux_match.group("credito")),
-                            "Saldo Atual": parse_money_value(aux_match.group("saldo_atual")),
-                        }
-                    )
-                    continue
-
-                summary_match = summary_pattern.match(normalized_line)
-                if summary_match:
-                    rows.append(
-                        {
-                            "Red": "",
-                            "Conta": "",
-                            "Descricao": "Sem descricao",
-                            "Saldo Anterior": parse_money_value(summary_match.group("saldo_anterior")),
-                            "Debito": parse_money_value(summary_match.group("debito")),
-                            "Credito": parse_money_value(summary_match.group("credito")),
-                            "Saldo Atual": parse_money_value(summary_match.group("saldo_atual")),
-                        }
-                    )
-                continue
-
-            rows.append(
-                {
-                    "Red": match.group("red"),
-                    "Conta": match.group("conta"),
-                    "Descricao": match.group("descricao"),
-                    "Saldo Anterior": parse_money_value(match.group("saldo_anterior")),
-                    "Debito": parse_money_value(match.group("debito")),
-                    "Credito": parse_money_value(match.group("credito")),
-                    "Saldo Atual": parse_money_value(match.group("saldo_atual")),
-                }
-            )
-
-    return rows
-
-
-def parse_diario_pdf(pdf) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    current: dict[str, object] | None = None
-
-    for page in pdf.pages:
-        line_map = extract_pdf_lines(page)
-        for _, words in line_map:
-            if not words:
-                continue
-
-            ordered = sorted(words, key=lambda item: item[0])
-            texts = [text for _, text in ordered]
-            first_text = texts[0]
-
-            line_text = " ".join(texts)
-            normalized_line = normalize_text(line_text)
-
-            if (
-                first_text == "Lote"
-                or "diario" in normalized_line
-                or "pagina:" in normalized_line
-                or "periodo:" in normalized_line
-                or "uruaçu" in normalized_line
-                or "uruacu" in normalized_line
-                or "hcn - hosp" in normalized_line
-                or "total do dia:" in normalized_line
-                or "total da empresa:" in normalized_line
-                or "total geral:" in normalized_line
-                or re.fullmatch(r"(?:-?\d{1,3}(?:\.\d{3})*,\d{2}\s*){1,3}", line_text.strip()) is not None
-                or "19.324.171/0008-70" in line_text
-                or "centro-norte goiano" in normalized_line
-            ):
-                continue
-
-            if re.fullmatch(r"\d+", first_text) and len(ordered) >= 2 and re.match(r"^\d{8}", texts[1]):
-                if current is not None:
-                    rows.append(finalize_diario_pdf_row(current))
-
-                lote = first_text
-                nr_mvto, conta_debito_codigo = split_mvto_and_account(texts[1])
-                debit_tokens = [conta_debito_codigo] if conta_debito_codigo else []
-                debit_tokens.extend(text for x, text in ordered if 100 <= x < 200)
-                credit_tokens = [text for x, text in ordered if 200 <= x < 309]
-                historico_words = [text for x, text in ordered if 309 <= x < 470]
-                amount_values = [
-                    (x, parse_money_value(text))
-                    for x, text in ordered
-                    if x >= 470 and parse_money_value(text) is not None
-                ]
-
-                debito = None
-                credito = None
-                if len(amount_values) >= 2:
-                    debito = amount_values[0][1]
-                    credito = amount_values[-1][1]
-                elif len(amount_values) == 1:
-                    amount = amount_values[0][1]
-                    has_debit_side = bool(debit_tokens)
-                    has_credit_side = bool(credit_tokens)
-                    if has_debit_side and not has_credit_side:
-                        debito = amount
-                    elif has_credit_side and not has_debit_side:
-                        credito = amount
-                    elif amount_values[0][0] >= 535:
-                        credito = amount
-                    else:
-                        debito = amount
-
-                current = {
-                    "Lote": lote,
-                    "Nr Mvto": nr_mvto,
-                    "Conta Debito": " ".join(debit_tokens).strip(),
-                    "Conta Credito": " ".join(credit_tokens).strip(),
-                    "Historico": " ".join(historico_words).strip(),
-                    "Debito": debito,
-                    "Credito": credito,
-                    "_debito_desc": [],
-                    "_credito_desc": [],
-                    "_historico_extra": [],
-                }
-                continue
-
-            if current is None:
-                continue
-
-            if "emitido por:" in normalized_line:
-                continue
-
-            for x, text in ordered:
-                if 100 <= x < 200:
-                    current["_debito_desc"].append(text)
-                elif 200 <= x < 309:
-                    current["_credito_desc"].append(text)
-                elif 309 <= x < 470:
-                    current["_historico_extra"].append(text)
-
-    if current is not None:
-        rows.append(finalize_diario_pdf_row(current))
-
-    return rows
-
-
-def finalize_diario_pdf_row(current: dict[str, object]) -> dict[str, object]:
-    conta_debito = join_description(
-        current["Conta Debito"],
-        " ".join(current.pop("_debito_desc", [])),
-    )
-    conta_credito = join_description(
-        current["Conta Credito"],
-        " ".join(current.pop("_credito_desc", [])),
-    )
-    historico = join_description(
-        current["Historico"],
-        " ".join(current.pop("_historico_extra", [])),
-    )
-    return {
-        "Lote": current["Lote"],
-        "Nr Mvto": current["Nr Mvto"],
-        "Conta Debito": clean_diario_account(conta_debito),
-        "Conta Credito": clean_diario_account(conta_credito),
-        "Historico": historico or "Sem historico",
-        "Debito": current["Debito"],
-        "Credito": current["Credito"],
-    }
-
-
-def parse_razao_pdf(pdf) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    current_account = ""
-    pending_record: dict[str, object] | None = None
-    pending_history = ""
-    money_pattern = r"-?\d{1,3}(?:\.\d{3})*,\d{2}"
-
-    for page in pdf.pages:
-        text = page.extract_text() or ""
-        for raw_line in text.splitlines():
-            line = normalize_spaces(raw_line)
-            if not line:
-                continue
-            if line.startswith("Conta Analítica:") or line.startswith("Conta Analitica:"):
-                match = re.search(r"Conta Anal[íi]tica:\s*(.+?)\s+Saldo Anterior:", line)
-                current_account = match.group(1).strip() if match else line.split(":", 1)[-1].strip()
-                pending_record = None
-                pending_history = ""
-                continue
-            if line.startswith("Data ") or "Razão" in line or "Pagina:" in normalize_text(line):
-                continue
-            parsed_date = parse_date_value(line.split(" ")[0])
-            if parsed_date:
-                values = re.findall(money_pattern, line)
-                history_match = re.search(
-                    rf"^{re.escape(parsed_date)}\s+{money_pattern}\s+{money_pattern}\s+{money_pattern}\s+(.*)$",
-                    line,
-                )
-                history = history_match.group(1).strip() if history_match else ""
-                pending_history = history
-                pending_record = {
-                    "Conta Analitica": current_account or "Sem conta",
-                    "Data": parsed_date,
-                    "Historico": history or "Sem historico",
-                    "Contrapartida": "",
-                    "Debito": parse_money_value(values[0]) if len(values) > 0 else None,
-                    "Credito": parse_money_value(values[1]) if len(values) > 1 else None,
-                    "Saldo": parse_money_value(values[2]) if len(values) > 2 else None,
-                }
-                rows.append(pending_record)
-                continue
-            if line.startswith("Contrapartida:"):
-                if pending_record is not None:
-                    contra = line.split(":", 1)[1].strip()
-                    money_match = re.search(rf"\s+{money_pattern}\s+{money_pattern}\s+", contra)
-                    if money_match:
-                        contra = contra[: money_match.start()].strip()
-                    pending_record["Contrapartida"] = contra
-                continue
-            if pending_record is not None:
-                pending_record["Historico"] = join_description(pending_record["Historico"], line)
-
-    return rows
-
-
-def extract_pdf_lines(page) -> list[tuple[float, list[tuple[float, str]]]]:
-    words = page.extract_words(use_text_flow=True)
-    grouped: dict[float, list[tuple[float, str]]] = {}
-    for word in words:
-        key = round(word["top"], 1)
-        grouped.setdefault(key, []).append((round(word["x0"], 1), word["text"]))
-    return sorted(grouped.items(), key=lambda item: item[0])
-
-
-def split_mvto_and_account(value: str) -> tuple[str, str]:
-    match = re.match(r"^(\d{8})(.+)$", value)
-    if match:
-        return match.group(1), match.group(2)
-    return value[:8], value[8:]
-
-
-def is_account_code(value: str) -> bool:
-    return bool(re.match(r"^\d[\d\.]+$", value))
-
-
-def clean_diario_account(value: str) -> str:
-    cleaned = normalize_spaces(value)
-    cleaned = re.sub(r"\s*-\s*", " - ", cleaned)
-    return normalize_spaces(cleaned)
-
-
-def convert_xls_cell(workbook, value: object, cell_type: int) -> object:
-    if cell_type == xlrd.XL_CELL_DATE:
-        return xlrd.xldate.xldate_as_datetime(value, workbook.datemode)
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return value
-
-
-def detect_structured_layout(rows: list[list[object]]) -> dict[str, object] | None:
-    for index in range(min(len(rows), 20)):
-        row = rows[index]
-        columns: dict[str, int] = {}
-
-        for cell_index, value in enumerate(row):
-            normalized = normalize_text(value)
-            if not normalized:
-                continue
-
-            for key, aliases in HEADER_ALIASES.items():
-                if normalized in aliases and key not in columns:
-                    columns[key] = cell_index
-
-        if {"date", "description"}.issubset(columns) and columns.keys() & {"debit", "credit", "saldo"}:
-            return {"header_index": index, "columns": columns}
-
+def detect_balancete_layout(rows: list[list]) -> dict | None:
+    for index in range(min(len(rows), 10)):
+        norm_row = [normalize_text(v) for v in rows[index]]
+        columns = {
+            "conta": find_header_index(norm_row, {"conta"}),
+            "descricao": find_header_index(norm_row, {"descricao", "nome"}),
+            "saldo_anterior": find_header_index(norm_row, {"saldo anterior"}),
+            "debito": find_header_index(norm_row, {"valor debito", "debito"}),
+            "credito": find_header_index(norm_row, {"valor credito", "credito"}),
+            "saldo_atual": find_header_index(norm_row, {"saldo atual"}),
+        }
+        required = {"conta", "descricao", "saldo_anterior", "debito", "credito", "saldo_atual"}
+        if all(columns[k] is not None for k in required):
+            columns["header_index"] = index
+            columns["red"] = None  # optional – not required
+            return columns
     return None
 
 
-def parse_structured_rows(
-    rows: list[list[object]], header_index: int, columns: dict[str, int]
-) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    current: dict[str, object] | None = None
-    ignored_columns = set(columns.values())
+def detect_diario_layout(rows: list[list]) -> dict | None:
+    for index in range(min(len(rows), 15)):
+        norm_row = [normalize_text(v) for v in rows[index]]
+        columns = {
+            "lote": find_header_index(norm_row, {"lote"}),
+            "nr_mvto": find_header_index(norm_row, {"nr. mvto", "nr mvto"}),
+            "conta_debito": find_header_index(norm_row, {"cont. debito", "cont debito"}),
+            "conta_credito": find_header_index(norm_row, {"cont. credito", "cont credito"}),
+            "historico": find_header_index(norm_row, {"historico", "historico"}),
+            "debito": find_header_index(norm_row, {"valor debito", "debito"}),
+            "credito": find_header_index(norm_row, {"valor credito", "credito"}),
+        }
+        if all(v is not None for v in columns.values()):
+            columns["header_index"] = index
+            return columns
+    return None
 
-    for row in rows[header_index + 1 :]:
+
+def detect_razao_layout(rows: list[list]) -> dict | None:
+    for index in range(min(len(rows), 20)):
+        norm_row = [normalize_text(v) for v in rows[index]]
+        if "conta analitica:" in norm_row or "conta analitica" in norm_row:
+            return {"account_header_index": index}
+    return None
+
+
+def detect_structured_layout(rows: list[list]) -> dict | None:
+    for index in range(min(len(rows), 20)):
+        row = rows[index]
+        columns: dict[str, int] = {}
+        for cell_index, value in enumerate(row):
+            norm = normalize_text(value)
+            if not norm:
+                continue
+            for key, aliases in HEADER_ALIASES.items():
+                if norm in aliases and key not in columns:
+                    columns[key] = cell_index
+        if {"date", "description"}.issubset(columns) and columns.keys() & {"debit", "credit", "saldo"}:
+            return {"header_index": index, "columns": columns}
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Balancete parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
+    parsed: list[dict] = []
+
+    for row in rows[columns["header_index"] + 1:]:
+        aux_label = normalize_text(get_value(row, 2))
+        if aux_label.startswith("conta aux"):
+            aux_code = normalize_spaces(get_value(row, 4))
+            aux_desc = normalize_spaces(get_value(row, 5))
+            sa, deb, cred, sat = _extract_balancete_money(row)
+            if any([aux_code, aux_desc, sa, deb, cred, sat]):
+                parsed.append({
+                    "REG": "0300",
+                    "ContaContabil": aux_code,
+                    "NomeConta": aux_desc or "Sem descricao",
+                    "SaldoAnterior": sa,
+                    "Debito": deb,
+                    "Credito": cred,
+                    "SaldoAtual": sat,
+                    "Estoque": "N", "AtivoImob": "N",
+                    "DepreciacaoAcumulativa": "N", "ContaFinanceira": "N",
+                    "ReservaDeContigencia": "N", "Centro de Custos": None,
+                })
+            continue
+
+        conta = normalize_spaces(get_value(row, columns["conta"]))
+        descricao = normalize_spaces(get_value(row, columns["descricao"]))
+        sa, deb, cred, sat = _extract_balancete_money(row)
+
+        if normalize_text(conta) == "conta" or normalize_text(descricao) == "descricao":
+            continue
+        if not any([conta, descricao, sa, deb, cred, sat]):
+            continue
+
+        parsed.append({
+            "REG": "0300",
+            "ContaContabil": conta,
+            "NomeConta": descricao or "Sem descricao",
+            "SaldoAnterior": sa,
+            "Debito": deb,
+            "Credito": cred,
+            "SaldoAtual": sat,
+            "Estoque": "N", "AtivoImob": "N",
+            "DepreciacaoAcumulativa": "N", "ContaFinanceira": "N",
+            "ReservaDeContigencia": "N", "Centro de Custos": None,
+        })
+
+    return parsed
+
+
+def _extract_balancete_money(
+    row: list,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    money_values = [parse_money_value(v) for v in row if parse_money_value(v) is not None]
+    if len(money_values) >= 4:
+        return money_values[-4], money_values[-3], money_values[-2], money_values[-1]
+    if len(money_values) == 3:
+        return None, money_values[0], money_values[1], money_values[2]
+    if len(money_values) == 2:
+        return None, money_values[0], money_values[1], None
+    if len(money_values) == 1:
+        return None, None, None, money_values[0]
+    return None, None, None, None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Diário parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
+    """
+    Process ALL non-empty rows (including date headers and repeated column headers).
+    Each XLS sub-row (debit side OR credit side) becomes one HCN output row.
+    Combined rows (both sides in one row) are split into two output rows.
+    """
+    parsed: list[dict] = []
+    current_date = ""
+
+    col_lote = columns["lote"]
+    col_debito_conta = columns["conta_debito"]
+    col_credito_conta = columns["conta_credito"]
+    col_historico = columns["historico"]
+    col_debito_val = columns["debito"]
+    col_credito_val = columns["credito"]
+
+    for row in rows:
+        texts = [normalize_spaces(v) for v in row]
+
+        # ── Date header row: "01 de Março de 2026" in one of the cells ──
+        for cell_val in texts:
+            pt_date = parse_pt_date_header(cell_val)
+            if pt_date:
+                current_date = pt_date
+                break
+        else:
+            # Not a date header – process as data row
+            lote_text = _safe_col(texts, col_lote)
+
+            # Skip column-header repetition rows
+            if normalize_text(lote_text) == "lote":
+                continue
+
+            conta_debito = _safe_col(texts, col_debito_conta)
+            conta_credito = _safe_col(texts, col_credito_conta)
+            historico = _safe_col(texts, col_historico) or "Sem historico"
+            debito_val = parse_money_value(_safe_col(texts, col_debito_val))
+            credito_val = parse_money_value(_safe_col(texts, col_credito_val))
+
+            if not conta_debito and not conta_credito:
+                continue
+
+            if conta_debito:
+                code, name = split_account_field(conta_debito)
+                parsed.append({
+                    "REG": 1600,
+                    "DATA": current_date,
+                    "CLASSIFICACAO": code,
+                    "DESCRICAO": name,
+                    "HISTORICO": historico,
+                    "DEBITO": decimal_to_float(debito_val),
+                    "CREDITO": 0.0 if debito_val is not None else None,
+                    "Centro de Custos": None,
+                })
+
+            if conta_credito:
+                code, name = split_account_field(conta_credito)
+                parsed.append({
+                    "REG": 1600,
+                    "DATA": current_date,
+                    "CLASSIFICACAO": code,
+                    "DESCRICAO": name,
+                    "HISTORICO": historico,
+                    "DEBITO": None,
+                    "CREDITO": decimal_to_float(credito_val),
+                    "Centro de Custos": None,
+                })
+
+    return parsed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Razão parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
+    parsed: list[dict] = []
+    current_account_name = ""
+    current_account_code = ""
+    current_saldo_anterior: Decimal | None = None
+    current_date = ""
+    pending_record: dict | None = None
+    expecting_contra = False
+
+    for row in rows[layout["account_header_index"]:]:
+        texts = [normalize_spaces(v) for v in row]
+        non_empty_vals = [v for v in texts if v]
+
+        if not non_empty_vals:
+            continue
+
+        col1 = _safe_col(texts, 1)
+        col3 = _safe_col(texts, 3)
+        col5 = _safe_col(texts, 5)
+        col8 = _safe_col(texts, 8)
+        col11 = _safe_col(texts, 11)
+        col16 = _safe_col(texts, 16)
+        col20 = _safe_col(texts, 20)
+        col24 = _safe_col(texts, 24)
+
+        # ── (1) Account header row (always checked first) ──────────────────
+        if col1 in {"Conta Analitica:", "Conta Analítica:"}:
+            expecting_contra = False
+            current_account_code, current_account_name = parse_razao_account_header(col5)
+            current_saldo_anterior = parse_money_value(col24)
+            pending_record = None
+            continue
+
+        # ── (2) Account code row after Contrapartida: ──────────────────────
+        if expecting_contra:
+            # If this row has a parseable date or is a Contrapartida label itself,
+            # it is NOT the account-code row – reset the flag and fall through.
+            if parse_date_value(col1) is not None or col3 in {"Contrapartida:", "Contrapartida"}:
+                expecting_contra = False
+                # fall through to date/transaction handling below
+            else:
+                if col5 and pending_record is not None:
+                    pending_record["Contra Partida"] = parse_razao_contra_code(col5)
+                expecting_contra = False
+                continue
+
+        # ── (3) Skip "Data" column header ─────────────────────────────────
+        if col1 == "Data" or (normalize_text(col1) == "data" and parse_date_value(col1) is None):
+            continue
+
+        # ── (4) Contrapartida label row ────────────────────────────────────
+        if col3 in {"Contrapartida:", "Contrapartida"}:
+            expecting_contra = True
+            continue
+
+        # ── (5) Transaction row (has date or carries current date) ─────────
+        row_date = parse_date_value(col1)
+        if row_date:
+            current_date = row_date
+
+        debit = parse_money_value(col8)
+        credit = parse_money_value(col11)
+        saldo = parse_money_value(col16)
+
+        if debit is not None or credit is not None or saldo is not None:
+            pending_record = {
+                "REG": 1700,
+                "NOME CONTA": current_account_name or "Sem conta",
+                "CONTA CONTABIL": current_account_code or "",
+                "DATA": current_date,
+                "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
+                "HISTORICO": col20 or "Sem historico",
+                "DEBITO": decimal_to_float(debit),
+                "CREDITO": decimal_to_float(credit),
+                "Saldo": decimal_to_float(saldo),
+                "Contra Partida": "",
+            }
+            parsed.append(pending_record)
+
+    return parsed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Generic / structured fallback parsers (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_structured_rows(
+    rows: list[list], header_index: int, columns: dict
+) -> list[dict]:
+    records: list[dict] = []
+    current: dict | None = None
+    ignored = set(columns.values())
+
+    for row in rows[header_index + 1:]:
         parsed_date = parse_date_value(get_value(row, columns.get("date")))
         description = normalize_spaces(get_value(row, columns.get("description")))
         debit = parse_money_value(get_value(row, columns.get("debit")))
@@ -641,22 +874,19 @@ def parse_structured_rows(
 
         if parsed_date:
             current = {
-                "Data": parsed_date,
-                "Descricao": description,
-                "Debito": debit,
-                "Credito": credit,
-                "Saldo": saldo,
+                "Data": parsed_date, "Descricao": description,
+                "Debito": debit, "Credito": credit, "Saldo": saldo,
             }
-            append_extra_description(current, row, ignored_columns)
+            append_extra_description(current, row, ignored)
             records.append(current)
             continue
 
         if current is None:
             continue
 
-        continued_description = description or collect_text_fragments(row, ignored_columns)
-        if continued_description:
-            current["Descricao"] = join_description(current["Descricao"], continued_description)
+        continued = description or collect_text_fragments(row, ignored)
+        if continued:
+            current["Descricao"] = join_description(current["Descricao"], continued)
 
         if current["Debito"] is None and debit is not None:
             current["Debito"] = debit
@@ -668,9 +898,9 @@ def parse_structured_rows(
     return finalize_records(records)
 
 
-def parse_generic_rows(rows: list[list[object]]) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    current: dict[str, object] | None = None
+def parse_generic_rows(rows: list[list]) -> list[dict]:
+    records: list[dict] = []
+    current: dict | None = None
 
     for row in rows:
         parsed_date = first_date_in_row(row)
@@ -680,11 +910,8 @@ def parse_generic_rows(rows: list[list[object]]) -> list[dict[str, object]]:
         if parsed_date:
             debit, credit, saldo = distribute_amounts(money_cells)
             current = {
-                "Data": parsed_date,
-                "Descricao": " ".join(text_parts),
-                "Debito": debit,
-                "Credito": credit,
-                "Saldo": saldo,
+                "Data": parsed_date, "Descricao": " ".join(text_parts),
+                "Debito": debit, "Credito": credit, "Saldo": saldo,
             }
             records.append(current)
             continue
@@ -692,9 +919,9 @@ def parse_generic_rows(rows: list[list[object]]) -> list[dict[str, object]]:
         if current is None:
             continue
 
-        continuation_text = " ".join(text_parts)
-        if continuation_text:
-            current["Descricao"] = join_description(current["Descricao"], continuation_text)
+        continuation = " ".join(text_parts)
+        if continuation:
+            current["Descricao"] = join_description(current["Descricao"], continuation)
 
         debit, credit, saldo = distribute_amounts(money_cells)
         if current["Debito"] is None and debit is not None:
@@ -707,19 +934,21 @@ def parse_generic_rows(rows: list[list[object]]) -> list[dict[str, object]]:
     return finalize_records(records)
 
 
-def finalize_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    cleaned: list[dict[str, object]] = []
-    for record in records:
-        if not record["Data"]:
+def finalize_records(records: list[dict]) -> list[dict]:
+    cleaned = []
+    for r in records:
+        if not r["Data"]:
             continue
-
-        record["Descricao"] = normalize_spaces(record["Descricao"]) or "Sem descricao"
-        cleaned.append(record)
-
+        r["Descricao"] = normalize_spaces(r["Descricao"]) or "Sem descricao"
+        cleaned.append(r)
     return cleaned
 
 
-def write_records(sheet, parsed_sheet: dict[str, object]) -> None:
+# ═══════════════════════════════════════════════════════════════════════════════
+# Output writing & styling
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def write_records(sheet, parsed_sheet: dict) -> None:
     headers = parsed_sheet["headers"]
     sheet.append(headers)
     for record in parsed_sheet["rows"]:
@@ -730,16 +959,16 @@ def write_records(sheet, parsed_sheet: dict[str, object]) -> None:
         sheet.append(row)
 
 
-def style_output_sheet(sheet, parsed_sheet: dict[str, object], sheet_index: int) -> None:
+def style_output_sheet(sheet, parsed_sheet: dict, sheet_index: int) -> None:
     sheet.sheet_view.showGridLines = False
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
 
     last_row = sheet.max_row
-    last_column = sheet.max_column
+    last_col = sheet.max_column
     date_columns = parsed_sheet["date_columns"]
     money_columns = parsed_sheet["money_columns"]
-    description_column = parsed_sheet["description_column"]
+    desc_col = parsed_sheet["description_column"]
 
     for cell in sheet[1]:
         cell.fill = HEADER_FILL
@@ -748,64 +977,65 @@ def style_output_sheet(sheet, parsed_sheet: dict[str, object], sheet_index: int)
         cell.border = THIN_BORDER
 
     for row in range(2, last_row + 1):
-        for column in range(1, last_column + 1):
-            cell = sheet.cell(row=row, column=column)
+        for col in range(1, last_col + 1):
+            cell = sheet.cell(row=row, column=col)
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(vertical="center", wrap_text=column == description_column)
+            cell.alignment = Alignment(vertical="center", wrap_text=(col == desc_col))
 
             if row % 2 == 0:
                 cell.fill = ALT_ROW_FILL
 
-            if column in date_columns:
+            if col in date_columns:
                 cell.number_format = "dd/mm/yyyy"
-            elif column in money_columns:
-                cell.number_format = '#,##0.00'
+            elif col in money_columns:
+                cell.number_format = '"R$ "#,##0.00'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
 
-    highlight_total_rows(sheet, last_row, last_column, description_column)
+    highlight_total_rows(sheet, last_row, last_col, desc_col)
     adjust_column_widths(sheet, parsed_sheet)
-    create_table(sheet, last_row, last_column, sheet_index)
+    create_table(sheet, last_row, last_col, sheet_index)
 
 
-def highlight_total_rows(sheet, last_row: int, last_column: int, description_column: int) -> None:
+def highlight_total_rows(sheet, last_row: int, last_col: int, desc_col: int) -> None:
     for row in range(2, last_row + 1):
-        description = sheet.cell(row=row, column=description_column).value
-        if isinstance(description, str) and any(
-            keyword in description.lower() for keyword in ("total", "subtotal", "saldo anterior", "resumo")
+        desc = sheet.cell(row=row, column=desc_col).value
+        if isinstance(desc, str) and any(
+            kw in desc.lower() for kw in ("total", "subtotal", "saldo anterior", "resumo")
         ):
-            for column in range(1, last_column + 1):
-                cell = sheet.cell(row=row, column=column)
+            for col in range(1, last_col + 1):
+                cell = sheet.cell(row=row, column=col)
                 cell.font = Font(bold=True, color="1F1F1F")
                 cell.fill = PatternFill("solid", fgColor="D9EAD3")
                 cell.border = TOTAL_BORDER
 
 
-def adjust_column_widths(sheet, parsed_sheet: dict[str, object]) -> None:
-    if parsed_sheet["headers"] == BALANCETE_HEADERS:
-        widths = {1: 12, 2: 22, 3: 54, 4: 18, 5: 18, 6: 18, 7: 18}
-    elif parsed_sheet["headers"] == DIARIO_HEADERS:
-        widths = {1: 12, 2: 14, 3: 36, 4: 36, 5: 56, 6: 18, 7: 18}
-    elif parsed_sheet["headers"] == RAZAO_HEADERS:
-        widths = {1: 42, 2: 14, 3: 56, 4: 28, 5: 18, 6: 18, 7: 18}
+def adjust_column_widths(sheet, parsed_sheet: dict) -> None:
+    headers = parsed_sheet["headers"]
+    if headers == BALANCETE_HCN_HEADERS:
+        widths = {1: 8, 2: 22, 3: 54, 4: 18, 5: 18, 6: 18, 7: 18, 8: 10, 9: 12, 10: 22, 11: 16, 12: 22, 13: 16}
+    elif headers == DIARIO_HCN_HEADERS:
+        widths = {1: 8, 2: 10, 3: 26, 4: 40, 5: 60, 6: 18, 7: 18, 8: 16}
+    elif headers == RAZAO_HCN_HEADERS:
+        widths = {1: 8, 2: 44, 3: 22, 4: 16, 5: 18, 6: 56, 7: 18, 8: 18, 9: 18, 10: 22}
     else:
         widths = {1: 14, 2: 60, 3: 16, 4: 16, 5: 16}
-    for column_idx, width in widths.items():
-        sheet.column_dimensions[get_column_letter(column_idx)].width = width
+    for col_idx, width in widths.items():
+        sheet.column_dimensions[get_column_letter(col_idx)].width = width
 
 
-def create_table(sheet, last_row: int, last_column: int, sheet_index: int) -> None:
+def create_table(sheet, last_row: int, last_col: int, sheet_index: int) -> None:
     if last_row < 2:
         return
-
-    table_range = f"A1:{get_column_letter(last_column)}{last_row}"
+    table_range = f"A1:{get_column_letter(last_col)}{last_row}"
     safe_title = re.sub(r"[^A-Za-z0-9_]", "", sheet.title)[:18] or "Planilha"
-    table = Table(displayName=f"Tabela_{sheet_index + 1}_{safe_title}", ref=table_range)
+    table = Table(
+        displayName=f"Tabela_{sheet_index + 1}_{safe_title}",
+        ref=table_range,
+    )
     table.tableStyleInfo = TableStyleInfo(
         name="TableStyleMedium2",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False,
+        showFirstColumn=False, showLastColumn=False,
+        showRowStripes=True, showColumnStripes=False,
     )
     sheet.add_table(table)
 
@@ -815,15 +1045,70 @@ def build_sheet_title(original_title: str, index: int) -> str:
     return f"Organizado{base}"[:31]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Helper / utility functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_pt_date_header(text: str) -> str | None:
+    """Parse 'DD de Mês de AAAA' (from TOTVS date headers) → 'DD/MM'."""
+    if not text:
+        return None
+    norm = normalize_text(text)  # removes accents, lowercases
+    m = re.match(r"^(\d{1,2})\s+de\s+(\w+)\s+de\s+\d{4}$", norm)
+    if m:
+        day = m.group(1).zfill(2)
+        month = PT_MONTHS.get(m.group(2))
+        if month:
+            return f"{day}/{month}"
+    return None
+
+
+def split_account_field(text: str) -> tuple[str, str]:
+    """Split 'CODE - NAME' into (code, name). Handles missing dash gracefully."""
+    stripped = text.strip()
+    m = re.match(r"^([\d.]+)\s*-\s*(.+)$", stripped)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return stripped, stripped
+
+
+def parse_razao_account_header(text: str) -> tuple[str, str]:
+    """Parse 'SEQNO CODE - NAME' → (code, name). E.g. '92576 1.1.1.02.02.010 - BCO CEF...'"""
+    if not text:
+        return "", ""
+    m = ACCOUNT_RE.match(text.strip())
+    if m:
+        return m.group(2).strip(), m.group(3).strip()
+    # Fallback: try CODE - NAME without sequence
+    m2 = re.match(r"^([\d.]+)\s*-\s*(.+)$", text.strip())
+    if m2:
+        return m2.group(1).strip(), m2.group(2).strip()
+    return "", text.strip()
+
+
+def parse_razao_contra_code(text: str) -> str:
+    """Parse 'SEQNO - CODE' → 'CODE'. E.g. '10028 - 2.1.1.02.01.001' → '2.1.1.02.01.001'"""
+    if not text:
+        return ""
+    m = CONTRA_RE.match(text.strip())
+    if m:
+        return m.group(2).strip()
+    # Maybe already just a code
+    return text.strip()
+
+
+def _safe_col(texts: list[str], index: int) -> str:
+    return texts[index] if index < len(texts) else ""
+
+
 def row_is_empty(row: tuple | list) -> bool:
-    return all(normalize_spaces(value) == "" for value in row)
+    return all(normalize_spaces(v) == "" for v in row)
 
 
 def normalize_text(value: object) -> str:
     text = normalize_spaces(value)
     if not text:
         return ""
-
     text = (
         unicodedata.normalize("NFKD", text)
         .encode("ascii", "ignore")
@@ -843,7 +1128,6 @@ def normalize_spaces(value: object) -> str:
 def parse_date_value(value: object) -> str | None:
     if value is None:
         return None
-
     if isinstance(value, datetime):
         return value.strftime("%d/%m/%Y")
     if isinstance(value, date):
@@ -852,7 +1136,6 @@ def parse_date_value(value: object) -> str | None:
     text = normalize_spaces(value)
     if not text:
         return None
-
     text = text.split(" ")[0]
 
     if DATE_RE.match(text):
@@ -873,7 +1156,6 @@ def parse_date_value(value: object) -> str | None:
 def parse_money_value(value: object) -> Decimal | None:
     if value is None or value == "":
         return None
-
     if isinstance(value, Decimal):
         return value
     if isinstance(value, (int, float)):
@@ -883,51 +1165,78 @@ def parse_money_value(value: object) -> Decimal | None:
     if not text:
         return None
 
-    normalized_text = text.replace("R$", "").replace(" ", "")
-    if not MONEY_RE.match(normalized_text):
+    normalized = text.replace("R$", "").replace(" ", "")
+    if not MONEY_RE.match(normalized):
         return None
 
     try:
-        return Decimal(normalized_text.replace(".", "").replace(",", "."))
+        return Decimal(normalized.replace(".", "").replace(",", "."))
     except InvalidOperation:
         return None
 
 
-def first_date_in_row(row: list[object]) -> str | None:
-    for value in row:
-        parsed = parse_date_value(value)
+def decimal_to_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def convert_xls_cell(workbook, value: object, cell_type: int) -> object:
+    if cell_type == xlrd.XL_CELL_DATE:
+        return xlrd.xldate.xldate_as_datetime(value, workbook.datemode)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def find_header_index(norm_row: list[str], candidates: set[str]) -> int | None:
+    for i, v in enumerate(norm_row):
+        if v in candidates:
+            return i
+    return None
+
+
+def get_value(row: list, index: int | None) -> object:
+    if index is None or index >= len(row):
+        return None
+    return row[index]
+
+
+def first_date_in_row(row: list) -> str | None:
+    for v in row:
+        parsed = parse_date_value(v)
         if parsed:
             return parsed
     return None
 
 
-def extract_money_cells(row: list[object]) -> list[Decimal]:
-    non_empty_indexes = [index for index, value in enumerate(row) if normalize_spaces(value) != ""]
-    candidate_indexes = set(non_empty_indexes[-3:])
+def extract_money_cells(row: list) -> list[Decimal]:
+    non_empty_idx = [i for i, v in enumerate(row) if normalize_spaces(v) != ""]
+    candidate_idx = set(non_empty_idx[-3:])
     values: list[Decimal] = []
-    for index, value in enumerate(row):
-        if index not in candidate_indexes and not isinstance(value, str):
+    for i, v in enumerate(row):
+        if i not in candidate_idx and not isinstance(v, str):
             continue
-
-        parsed = parse_money_value(value)
+        parsed = parse_money_value(v)
         if parsed is not None:
             values.append(parsed)
     return values
 
 
-def extract_text_parts(row: list[object]) -> list[str]:
+def extract_text_parts(row: list) -> list[str]:
     parts: list[str] = []
-    for value in row:
-        if parse_date_value(value) or parse_money_value(value) is not None:
+    for v in row:
+        if parse_date_value(v) or parse_money_value(v) is not None:
             continue
-
-        text = normalize_spaces(value)
+        text = normalize_spaces(v)
         if text:
             parts.append(text)
     return parts
 
 
-def distribute_amounts(values: list[Decimal]) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+def distribute_amounts(
+    values: list[Decimal],
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
     if not values:
         return None, None, None
     if len(values) == 1:
@@ -937,29 +1246,21 @@ def distribute_amounts(values: list[Decimal]) -> tuple[Decimal | None, Decimal |
     return values[-3], values[-2], values[-1]
 
 
-def get_value(row: list[object], index: int | None) -> object:
-    if index is None or index >= len(row):
-        return None
-    return row[index]
-
-
-def collect_text_fragments(row: list[object], ignored_columns: set[int]) -> str:
+def collect_text_fragments(row: list, ignored: set[int]) -> str:
     parts: list[str] = []
-    for index, value in enumerate(row):
-        if index in ignored_columns:
+    for i, v in enumerate(row):
+        if i in ignored:
             continue
-        if parse_money_value(value) is not None or parse_date_value(value):
+        if parse_money_value(v) is not None or parse_date_value(v):
             continue
-
-        text = normalize_spaces(value)
+        text = normalize_spaces(v)
         if text:
             parts.append(text)
-
     return " ".join(parts)
 
 
-def append_extra_description(current: dict[str, object], row: list[object], ignored_columns: set[int]) -> None:
-    extra = collect_text_fragments(row, ignored_columns)
+def append_extra_description(current: dict, row: list, ignored: set[int]) -> None:
+    extra = collect_text_fragments(row, ignored)
     if extra:
         current["Descricao"] = join_description(current["Descricao"], extra)
 
@@ -971,243 +1272,29 @@ def join_description(current: object, extra: str) -> str:
     return f"{base} {extra}".strip()
 
 
-def decimal_to_float(value: object) -> float | None:
-    if value is None:
-        return None
-    return float(value)
-def detect_balancete_layout(rows: list[list[object]]) -> dict[str, int] | None:
-    for index in range(min(len(rows), 10)):
-        normalized_row = [normalize_text(value) for value in rows[index]]
-        columns = {
-            "red": find_header_index(normalized_row, {"red.", "red"}),
-            "conta": find_header_index(normalized_row, {"conta"}),
-            "descricao": find_header_index(normalized_row, {"descricao", "descrição"}),
-            "saldo_anterior": find_header_index(normalized_row, {"saldo anterior"}),
-            "debito": find_header_index(normalized_row, {"valor debito", "debito", "valor débito"}),
-            "credito": find_header_index(normalized_row, {"valor credito", "credito", "valor crédito"}),
-            "saldo_atual": find_header_index(normalized_row, {"saldo atual"}),
-        }
-        if all(value is not None for value in columns.values()):
-            columns["header_index"] = index
-            return columns
-    return None
+# ── PDF-specific helpers ──────────────────────────────────────────────────────
+
+def extract_pdf_lines(page) -> list[tuple[float, list[tuple[float, str]]]]:
+    words = page.extract_words(use_text_flow=True)
+    grouped: dict[float, list[tuple[float, str]]] = {}
+    for word in words:
+        key = round(word["top"], 1)
+        grouped.setdefault(key, []).append((round(word["x0"], 1), word["text"]))
+    return sorted(grouped.items(), key=lambda item: item[0])
 
 
-def detect_diario_layout(rows: list[list[object]]) -> dict[str, int] | None:
-    for index in range(min(len(rows), 15)):
-        normalized_row = [normalize_text(value) for value in rows[index]]
-        columns = {
-            "lote": find_header_index(normalized_row, {"lote"}),
-            "nr_mvto": find_header_index(normalized_row, {"nr. mvto", "nr mvto"}),
-            "conta_debito": find_header_index(normalized_row, {"cont. debito", "cont debito"}),
-            "conta_credito": find_header_index(normalized_row, {"cont. credito", "cont credito"}),
-            "historico": find_header_index(normalized_row, {"historico", "histórico"}),
-            "debito": find_header_index(normalized_row, {"valor debito", "valor débito", "debito"}),
-            "credito": find_header_index(normalized_row, {"valor credito", "valor crédito", "credito"}),
-        }
-        if all(value is not None for value in columns.values()):
-            columns["header_index"] = index
-            return columns
-    return None
+def split_mvto_and_account(value: str) -> tuple[str, str]:
+    m = re.match(r"^(\d{8})(.+)$", value)
+    if m:
+        return m.group(1), m.group(2)
+    return value[:8], value[8:]
 
 
-def parse_diario_rows(rows: list[list[object]], columns: dict[str, int]) -> list[dict[str, object]]:
-    parsed_rows: list[dict[str, object]] = []
-    for row in rows[columns["header_index"] + 1 :]:
-        lote = normalize_spaces(get_value(row, columns["lote"]))
-        nr_mvto = normalize_spaces(get_value(row, columns["nr_mvto"]))
-        conta_debito = normalize_spaces(get_value(row, columns["conta_debito"]))
-        conta_credito = normalize_spaces(get_value(row, columns["conta_credito"]))
-        historico = normalize_spaces(get_value(row, columns["historico"]))
-        debito = parse_money_value(get_value(row, columns["debito"]))
-        credito = parse_money_value(get_value(row, columns["credito"]))
-
-        if normalize_text(lote) == "lote" or normalize_text(historico) in {"historico", "historico padrao"}:
-            continue
-
-        if not any([lote, nr_mvto, conta_debito, conta_credito, historico, debito, credito]):
-            continue
-
-        parsed_rows.append(
-            {
-                "Lote": lote,
-                "Nr Mvto": nr_mvto,
-                "Conta Debito": conta_debito,
-                "Conta Credito": conta_credito,
-                "Historico": historico or "Sem historico",
-                "Debito": debito,
-                "Credito": credito,
-            }
-        )
-    return parsed_rows
+def clean_diario_account(value: str) -> str:
+    cleaned = normalize_spaces(value)
+    cleaned = re.sub(r"\s*-\s*", " - ", cleaned)
+    return normalize_spaces(cleaned)
 
 
-def detect_razao_layout(rows: list[list[object]]) -> dict[str, int] | None:
-    for index in range(min(len(rows), 20)):
-        normalized_row = [normalize_text(value) for value in rows[index]]
-        if "conta analitica:" in normalized_row or "conta analitica" in normalized_row:
-            return {"account_header_index": index}
-    return None
-
-
-def parse_razao_rows(rows: list[list[object]], layout: dict[str, int]) -> list[dict[str, object]]:
-    parsed_rows: list[dict[str, object]] = []
-    current_account = ""
-    current_date = ""
-    pending_history = ""
-    pending_record: dict[str, object] | None = None
-
-    for row in rows[layout["account_header_index"] :]:
-        row_texts = [normalize_spaces(value) for value in row]
-        non_empty = [(index, value) for index, value in enumerate(row_texts) if value]
-        if not non_empty:
-            continue
-
-        if any(value == "Conta Analitica:" or value == "Conta Analítica:" for _, value in non_empty):
-            current_account = row_texts[5] if len(row_texts) > 5 else ""
-            current_date = ""
-            pending_history = ""
-            pending_record = None
-            continue
-
-        if any(value == "Data" for _, value in non_empty):
-            continue
-
-        row_date = first_date_in_row(row)
-        if row_date:
-            current_date = row_date
-            debit = first_money_in_indexes(row, [7, 8, 9, 10, 11, 12])
-            credit = first_money_in_indexes(row, [13, 14, 15, 16])
-            saldo = first_money_in_indexes(row, [17, 18, 19])
-            pending_record = {
-                "Conta Analitica": current_account or "Sem conta",
-                "Data": current_date,
-                "Historico": pending_history or "Sem historico",
-                "Contrapartida": "",
-                "Debito": debit,
-                "Credito": credit,
-                "Saldo": saldo,
-            }
-            parsed_rows.append(pending_record)
-            pending_history = ""
-            continue
-
-        history_candidate = first_text_in_indexes(row, [20, 21, 22, 23, 24])
-        if history_candidate and not contains_marker(history_candidate, ["saldo anterior:", "contrapartida:"]):
-            pending_history = join_description(pending_history, history_candidate)
-            if pending_record is not None and normalize_spaces(pending_record["Historico"]) in {"", "Sem historico"}:
-                pending_record["Historico"] = pending_history
-            continue
-
-        if any(value == "Contrapartida:" for _, value in non_empty):
-            if pending_record is not None:
-                alt_history = first_text_in_indexes(row, [20, 21, 22, 23, 24])
-                if alt_history:
-                    pending_record["Historico"] = join_description(pending_record["Historico"], alt_history)
-            continue
-
-        contra = first_text_in_indexes(row, [5, 6, 7, 8])
-        if contra and pending_record is not None:
-            pending_record["Contrapartida"] = contra
-
-    return parsed_rows
-
-
-def find_header_index(normalized_row: list[str], candidates: set[str]) -> int | None:
-    for index, value in enumerate(normalized_row):
-        if value in candidates:
-            return index
-    return None
-
-
-def parse_balancete_rows(rows: list[list[object]], columns: dict[str, int]) -> list[dict[str, object]]:
-    parsed_rows: list[dict[str, object]] = []
-
-    for row in rows[columns["header_index"] + 1 :]:
-        aux_label = normalize_text(get_value(row, 2))
-        if aux_label.startswith("conta aux"):
-            aux_code = normalize_spaces(get_value(row, 4))
-            aux_description = normalize_spaces(get_value(row, 5))
-            saldo_anterior = parse_money_value(get_value(row, 10))
-            debito = parse_money_value(get_value(row, 12))
-            credito = parse_money_value(get_value(row, 13))
-            saldo_atual = parse_money_value(get_value(row, 14))
-
-            if any([aux_code, aux_description, saldo_anterior, debito, credito, saldo_atual]):
-                parsed_rows.append(
-                    {
-                        "Red": "Conta Aux.",
-                        "Conta": aux_code,
-                        "Descricao": aux_description or "Sem descricao",
-                        "Saldo Anterior": saldo_anterior,
-                        "Debito": debito,
-                        "Credito": credito,
-                        "Saldo Atual": saldo_atual,
-                    }
-                )
-            continue
-
-        conta = normalize_spaces(get_value(row, columns["conta"]))
-        descricao = normalize_spaces(get_value(row, columns["descricao"]))
-        red = normalize_spaces(get_value(row, columns["red"]))
-        saldo_anterior, debito, credito, saldo_atual = extract_balancete_money_values(row)
-
-        if normalize_text(conta) == "conta" or normalize_text(descricao) == "descricao":
-            continue
-
-        if not any([conta, descricao, red, saldo_anterior, debito, credito, saldo_atual]):
-            continue
-
-        parsed_rows.append(
-            {
-                "Red": red,
-                "Conta": conta,
-                "Descricao": descricao or "Sem descricao",
-                "Saldo Anterior": saldo_anterior,
-                "Debito": debito,
-                "Credito": credito,
-                "Saldo Atual": saldo_atual,
-            }
-        )
-
-    return parsed_rows
-
-
-def extract_balancete_money_values(row: list[object]) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
-    money_values = [
-        parse_money_value(value)
-        for value in row
-        if parse_money_value(value) is not None
-    ]
-    if len(money_values) >= 4:
-        return money_values[-4], money_values[-3], money_values[-2], money_values[-1]
-    if len(money_values) == 3:
-        return None, money_values[0], money_values[1], money_values[2]
-    if len(money_values) == 2:
-        return None, money_values[0], money_values[1], None
-    if len(money_values) == 1:
-        return None, None, None, money_values[0]
-    return None, None, None, None
-
-
-def first_money_in_indexes(row: list[object], indexes: list[int]) -> Decimal | None:
-    for index in indexes:
-        value = get_value(row, index)
-        parsed = parse_money_value(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def first_text_in_indexes(row: list[object], indexes: list[int]) -> str:
-    parts: list[str] = []
-    for index in indexes:
-        value = normalize_spaces(get_value(row, index))
-        if value:
-            parts.append(value)
-    return " ".join(parts).strip()
-
-
-def contains_marker(text: str, markers: list[str]) -> bool:
-    normalized = normalize_text(text)
-    return any(marker in normalized for marker in markers)
+def is_account_code(value: str) -> bool:
+    return bool(re.match(r"^\d[\d\.]+$", value))
