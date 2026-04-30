@@ -324,12 +324,55 @@ def parse_balancete_pdf(pdf) -> list[dict[str, object]]:
         r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
         r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
     )
+    aux_pattern = re.compile(
+        r"^Conta\s*Aux\.?:\s*(?P<conta>\d+)\s*"
+        r"(?P<descricao>.+?)\s+"
+        r"(?P<saldo_anterior>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<debito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
+    )
+    summary_pattern = re.compile(
+        r"^(?P<saldo_anterior>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<debito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<credito>-?\d{1,3}(?:\.\d{3})*,\d{2})\s+"
+        r"(?P<saldo_atual>-?\d{1,3}(?:\.\d{3})*,\d{2})$"
+    )
 
     for page in pdf.pages:
         text = page.extract_text() or ""
         for line in text.splitlines():
-            match = pattern.match(normalize_spaces(line))
+            normalized_line = normalize_spaces(line)
+            match = pattern.match(normalized_line)
             if not match:
+                aux_match = aux_pattern.match(normalized_line)
+                if aux_match:
+                    rows.append(
+                        {
+                            "Red": "Conta Aux.",
+                            "Conta": aux_match.group("conta"),
+                            "Descricao": aux_match.group("descricao"),
+                            "Saldo Anterior": parse_money_value(aux_match.group("saldo_anterior")),
+                            "Debito": parse_money_value(aux_match.group("debito")),
+                            "Credito": parse_money_value(aux_match.group("credito")),
+                            "Saldo Atual": parse_money_value(aux_match.group("saldo_atual")),
+                        }
+                    )
+                    continue
+
+                summary_match = summary_pattern.match(normalized_line)
+                if summary_match:
+                    rows.append(
+                        {
+                            "Red": "",
+                            "Conta": "",
+                            "Descricao": "Sem descricao",
+                            "Saldo Anterior": parse_money_value(summary_match.group("saldo_anterior")),
+                            "Debito": parse_money_value(summary_match.group("debito")),
+                            "Credito": parse_money_value(summary_match.group("credito")),
+                            "Saldo Atual": parse_money_value(summary_match.group("saldo_atual")),
+                        }
+                    )
                 continue
 
             rows.append(
@@ -361,25 +404,65 @@ def parse_diario_pdf(pdf) -> list[dict[str, object]]:
             texts = [text for _, text in ordered]
             first_text = texts[0]
 
-            if first_text == "Lote" or "Diário" in texts or "Página:" in texts:
+            line_text = " ".join(texts)
+            normalized_line = normalize_text(line_text)
+
+            if (
+                first_text == "Lote"
+                or "diario" in normalized_line
+                or "pagina:" in normalized_line
+                or "periodo:" in normalized_line
+                or "uruaçu" in normalized_line
+                or "uruacu" in normalized_line
+                or "hcn - hosp" in normalized_line
+                or "total do dia:" in normalized_line
+                or "total da empresa:" in normalized_line
+                or "total geral:" in normalized_line
+                or re.fullmatch(r"(?:-?\d{1,3}(?:\.\d{3})*,\d{2}\s*){1,3}", line_text.strip()) is not None
+                or "19.324.171/0008-70" in line_text
+                or "centro-norte goiano" in normalized_line
+            ):
                 continue
 
-            if re.fullmatch(r"\d+", first_text) and len(ordered) >= 4 and re.match(r"^\d{8}\d", texts[1]):
+            if re.fullmatch(r"\d+", first_text) and len(ordered) >= 2 and re.match(r"^\d{8}", texts[1]):
                 if current is not None:
                     rows.append(finalize_diario_pdf_row(current))
 
                 lote = first_text
                 nr_mvto, conta_debito_codigo = split_mvto_and_account(texts[1])
-                conta_credito_codigo = next((text for x, text in ordered if 200 <= x < 265 and is_account_code(text)), "")
+                debit_tokens = [conta_debito_codigo] if conta_debito_codigo else []
+                debit_tokens.extend(text for x, text in ordered if 100 <= x < 200)
+                credit_tokens = [text for x, text in ordered if 200 <= x < 309]
                 historico_words = [text for x, text in ordered if 309 <= x < 470]
-                debito = next((parse_money_value(text) for x, text in ordered if 470 <= x < 535 and parse_money_value(text) is not None), None)
-                credito = next((parse_money_value(text) for x, text in ordered if x >= 535 and parse_money_value(text) is not None), None)
+                amount_values = [
+                    (x, parse_money_value(text))
+                    for x, text in ordered
+                    if x >= 470 and parse_money_value(text) is not None
+                ]
+
+                debito = None
+                credito = None
+                if len(amount_values) >= 2:
+                    debito = amount_values[0][1]
+                    credito = amount_values[-1][1]
+                elif len(amount_values) == 1:
+                    amount = amount_values[0][1]
+                    has_debit_side = bool(debit_tokens)
+                    has_credit_side = bool(credit_tokens)
+                    if has_debit_side and not has_credit_side:
+                        debito = amount
+                    elif has_credit_side and not has_debit_side:
+                        credito = amount
+                    elif amount_values[0][0] >= 535:
+                        credito = amount
+                    else:
+                        debito = amount
 
                 current = {
                     "Lote": lote,
                     "Nr Mvto": nr_mvto,
-                    "Conta Debito": conta_debito_codigo,
-                    "Conta Credito": conta_credito_codigo,
+                    "Conta Debito": " ".join(debit_tokens).strip(),
+                    "Conta Credito": " ".join(credit_tokens).strip(),
                     "Historico": " ".join(historico_words).strip(),
                     "Debito": debito,
                     "Credito": credito,
@@ -390,6 +473,9 @@ def parse_diario_pdf(pdf) -> list[dict[str, object]]:
                 continue
 
             if current is None:
+                continue
+
+            if "emitido por:" in normalized_line:
                 continue
 
             for x, text in ordered:
@@ -422,8 +508,8 @@ def finalize_diario_pdf_row(current: dict[str, object]) -> dict[str, object]:
     return {
         "Lote": current["Lote"],
         "Nr Mvto": current["Nr Mvto"],
-        "Conta Debito": conta_debito,
-        "Conta Credito": conta_credito,
+        "Conta Debito": clean_diario_account(conta_debito),
+        "Conta Credito": clean_diario_account(conta_credito),
         "Historico": historico or "Sem historico",
         "Debito": current["Debito"],
         "Credito": current["Credito"],
@@ -503,6 +589,12 @@ def split_mvto_and_account(value: str) -> tuple[str, str]:
 
 def is_account_code(value: str) -> bool:
     return bool(re.match(r"^\d[\d\.]+$", value))
+
+
+def clean_diario_account(value: str) -> str:
+    cleaned = normalize_spaces(value)
+    cleaned = re.sub(r"\s*-\s*", " - ", cleaned)
+    return normalize_spaces(cleaned)
 
 
 def convert_xls_cell(workbook, value: object, cell_type: int) -> object:
@@ -1032,13 +1124,33 @@ def parse_balancete_rows(rows: list[list[object]], columns: dict[str, int]) -> l
     parsed_rows: list[dict[str, object]] = []
 
     for row in rows[columns["header_index"] + 1 :]:
+        aux_label = normalize_text(get_value(row, 2))
+        if aux_label.startswith("conta aux"):
+            aux_code = normalize_spaces(get_value(row, 4))
+            aux_description = normalize_spaces(get_value(row, 5))
+            saldo_anterior = parse_money_value(get_value(row, 10))
+            debito = parse_money_value(get_value(row, 12))
+            credito = parse_money_value(get_value(row, 13))
+            saldo_atual = parse_money_value(get_value(row, 14))
+
+            if any([aux_code, aux_description, saldo_anterior, debito, credito, saldo_atual]):
+                parsed_rows.append(
+                    {
+                        "Red": "Conta Aux.",
+                        "Conta": aux_code,
+                        "Descricao": aux_description or "Sem descricao",
+                        "Saldo Anterior": saldo_anterior,
+                        "Debito": debito,
+                        "Credito": credito,
+                        "Saldo Atual": saldo_atual,
+                    }
+                )
+            continue
+
         conta = normalize_spaces(get_value(row, columns["conta"]))
         descricao = normalize_spaces(get_value(row, columns["descricao"]))
         red = normalize_spaces(get_value(row, columns["red"]))
-        saldo_anterior = parse_money_value(get_value(row, columns["saldo_anterior"]))
-        debito = parse_money_value(get_value(row, columns["debito"]))
-        credito = parse_money_value(get_value(row, columns["credito"]))
-        saldo_atual = parse_money_value(get_value(row, columns["saldo_atual"]))
+        saldo_anterior, debito, credito, saldo_atual = extract_balancete_money_values(row)
 
         if normalize_text(conta) == "conta" or normalize_text(descricao) == "descricao":
             continue
@@ -1059,6 +1171,23 @@ def parse_balancete_rows(rows: list[list[object]], columns: dict[str, int]) -> l
         )
 
     return parsed_rows
+
+
+def extract_balancete_money_values(row: list[object]) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+    money_values = [
+        parse_money_value(value)
+        for value in row
+        if parse_money_value(value) is not None
+    ]
+    if len(money_values) >= 4:
+        return money_values[-4], money_values[-3], money_values[-2], money_values[-1]
+    if len(money_values) == 3:
+        return None, money_values[0], money_values[1], money_values[2]
+    if len(money_values) == 2:
+        return None, money_values[0], money_values[1], None
+    if len(money_values) == 1:
+        return None, None, None, money_values[0]
+    return None, None, None, None
 
 
 def first_money_in_indexes(row: list[object], indexes: list[int]) -> Decimal | None:
