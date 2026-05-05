@@ -19,22 +19,18 @@ BALANCETE_HCN_HEADERS = [
     "REG", "ContaContabil", "NomeConta", "SaldoAnterior",
     "Debito", "Credito", "SaldoAtual",
     "Estoque", "AtivoImob", "DepreciacaoAcumulativa",
-    "ContaFinanceira", "ReservaDeContigencia", "Centro de Custos",
+    "ContaFinanceira", "ReservaDeContingência", "Centro de Custos",
 ]
 DIARIO_HCN_HEADERS = [
-    "REG", "DATA", "CLASSIFICACAO", "DESCRICAO",
-    "HISTORICO", "DEBITO", "CREDITO", "Centro de Custos",
+    "REG", "DATA", "CLASSIFICAÇÃO", "DESCRIÇÃO",
+    "HISTÓRICO", "DÉBITO", "CRÉDITO", "Centro de Custos",
 ]
 RAZAO_HCN_HEADERS = [
-    "REG", "NOME CONTA", "CONTA CONTABIL", "DATA",
-    "SALDO ANTERIOR", "HISTORICO", "DEBITO", "CREDITO", "Saldo", "Contra Partida",
+    "REG", "NOME CONTA", "CONTA CONTÁBIL", "DATA",
+    "SALDO ANTERIOR", "HISTÓRICO", "DÉBITO", "CRÉDITO", "Saldo", "Contra Partida",
 ]
 
-# Legacy headers kept for backward-compat fallback paths
 DEFAULT_OUTPUT_HEADERS = ["Data", "Descricao", "Debito", "Credito", "Saldo"]
-BALANCETE_HEADERS = BALANCETE_HCN_HEADERS  # alias
-DIARIO_HEADERS = DIARIO_HCN_HEADERS
-RAZAO_HEADERS = RAZAO_HCN_HEADERS
 
 # ── Styles ───────────────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -50,6 +46,7 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9E2F3"),
     bottom=Side(style="thin", color="D9E2F3"),
 )
+ACCOUNTING_FORMAT = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* "-"??_-;_-@_-'
 
 # ── Regexes ──────────────────────────────────────────────────────────────────
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -88,17 +85,36 @@ def beautify_workbook(file_stream: BytesIO, input_extension: str = ".xlsx") -> B
     output_workbook = Workbook()
     output_workbook.remove(output_workbook.active)
 
-    created_sheets = 0
+    # Accumulate rows per document type so sheets of the same type get merged.
+    # Key: tuple of header names → (first_title, parsed_sheet_template, [rows])
+    merged: dict[tuple, tuple[str, dict, list]] = {}
+    order: list[tuple] = []  # insertion order to preserve sheet ordering
+
     for original_title, rows in read_input_sheets(file_stream, input_extension):
         parsed_sheet = extract_records(rows)
         if not parsed_sheet:
             continue
 
+        key = tuple(parsed_sheet["headers"])
+        if key not in merged:
+            merged[key] = (original_title, parsed_sheet, list(parsed_sheet["rows"]))
+            order.append(key)
+        else:
+            merged[key][2].extend(parsed_sheet["rows"])
+
+    created_sheets = 0
+    for key in order:
+        title, template, all_rows = merged[key]
+        if not all_rows:
+            continue
+        final_sheet = dict(template)
+        final_sheet["rows"] = all_rows
+
         output_sheet = output_workbook.create_sheet(
-            title=build_sheet_title(original_title, created_sheets)
+            title=build_sheet_title(final_sheet["headers"], created_sheets)
         )
-        write_records(output_sheet, parsed_sheet)
-        style_output_sheet(output_sheet, parsed_sheet, created_sheets)
+        write_records(output_sheet, final_sheet)
+        style_output_sheet(output_sheet, final_sheet, created_sheets)
         created_sheets += 1
 
     if created_sheets == 0:
@@ -126,7 +142,7 @@ def beautify_pdf(file_stream: BytesIO) -> BytesIO:
 
     for sheet_index, (title, parsed_sheet) in enumerate(parsed_documents):
         output_sheet = output_workbook.create_sheet(
-            title=build_sheet_title(title, sheet_index)
+            title=build_sheet_title(parsed_sheet["headers"], sheet_index)
         )
         write_records(output_sheet, parsed_sheet)
         style_output_sheet(output_sheet, parsed_sheet, sheet_index)
@@ -231,7 +247,7 @@ def parse_balancete_pdf(pdf) -> list[dict]:
                 "AtivoImob": "N",
                 "DepreciacaoAcumulativa": "N",
                 "ContaFinanceira": "N",
-                "ReservaDeContigencia": "N",
+                "ReservaDeContingência": "N",
                 "Centro de Custos": None,
             })
     return rows
@@ -346,16 +362,16 @@ def _finalise_diario_pdf(c: dict) -> list[dict]:
     if conta_debito:
         code, name = split_account_field(conta_debito)
         rows.append({
-            "REG": 1600, "DATA": "", "CLASSIFICACAO": code, "DESCRICAO": name,
-            "HISTORICO": historico, "DEBITO": decimal_to_float(c["_debito"]),
-            "CREDITO": 0.0 if c["_debito"] is not None else None, "Centro de Custos": None,
+            "REG": 1600, "DATA": "", "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
+            "HISTÓRICO": historico, "DÉBITO": decimal_to_float(c["_debito"]),
+            "CRÉDITO": 0.0 if c["_debito"] is not None else None, "Centro de Custos": None,
         })
     if conta_credito:
         code, name = split_account_field(conta_credito)
         rows.append({
-            "REG": 1600, "DATA": "", "CLASSIFICACAO": code, "DESCRICAO": name,
-            "HISTORICO": historico, "DEBITO": None,
-            "CREDITO": decimal_to_float(c["_credito"]), "Centro de Custos": None,
+            "REG": 1600, "DATA": "", "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
+            "HISTÓRICO": historico, "DÉBITO": None,
+            "CRÉDITO": decimal_to_float(c["_credito"]), "Centro de Custos": None,
         })
     return rows
 
@@ -392,12 +408,12 @@ def parse_razao_pdf(pdf) -> list[dict]:
                 pending_record = {
                     "REG": 1700,
                     "NOME CONTA": current_account_name or "Sem conta",
-                    "CONTA CONTABIL": current_account_code or "",
+                    "CONTA CONTÁBIL": current_account_code or "",
                     "DATA": current_date,
                     "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
-                    "HISTORICO": "Sem historico",
-                    "DEBITO": decimal_to_float(parse_money_value(values[0])) if len(values) > 0 else None,
-                    "CREDITO": decimal_to_float(parse_money_value(values[1])) if len(values) > 1 else None,
+                    "HISTÓRICO": "Sem historico",
+                    "DÉBITO": decimal_to_float(parse_money_value(values[0])) if len(values) > 0 else None,
+                    "CRÉDITO": decimal_to_float(parse_money_value(values[1])) if len(values) > 1 else None,
                     "Saldo": decimal_to_float(parse_money_value(values[2])) if len(values) > 2 else None,
                     "Contra Partida": "",
                 }
@@ -413,8 +429,8 @@ def parse_razao_pdf(pdf) -> list[dict]:
                 continue
             if pending_record is not None:
                 extra = line.strip()
-                if extra and normalize_text(pending_record["HISTORICO"]) in {"", "sem historico"}:
-                    pending_record["HISTORICO"] = extra
+                if extra and normalize_text(pending_record["HISTÓRICO"]) in {"", "sem historico"}:
+                    pending_record["HISTÓRICO"] = extra
     return rows
 
 
@@ -633,27 +649,13 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
     parsed: list[dict] = []
 
     for row in rows[columns["header_index"] + 1:]:
-        aux_label = normalize_text(get_value(row, 2))
-        if aux_label.startswith("conta aux"):
-            aux_code = normalize_spaces(get_value(row, 4))
-            aux_desc = normalize_spaces(get_value(row, 5))
-            sa, deb, cred, sat = _extract_balancete_money(row)
-            if any([aux_code, aux_desc, sa, deb, cred, sat]):
-                parsed.append({
-                    "REG": "0300",
-                    "ContaContabil": aux_code,
-                    "NomeConta": aux_desc or "Sem descricao",
-                    "SaldoAnterior": sa,
-                    "Debito": deb,
-                    "Credito": cred,
-                    "SaldoAtual": sat,
-                    "Estoque": "N", "AtivoImob": "N",
-                    "DepreciacaoAcumulativa": "N", "ContaFinanceira": "N",
-                    "ReservaDeContigencia": "N", "Centro de Custos": None,
-                })
+        conta = normalize_spaces(get_value(row, columns["conta"]))
+        # Auxiliary (per-vendor) detail rows ("Conta Aux.:") must not appear in output.
+        # Also skip any TOTVS noise labels (Total:, Subtotal:, etc.).
+        conta_norm = normalize_text(conta)
+        if conta_norm.startswith("conta aux") or conta_norm.startswith("total") or conta_norm.startswith("subtotal"):
             continue
 
-        conta = normalize_spaces(get_value(row, columns["conta"]))
         descricao = normalize_spaces(get_value(row, columns["descricao"]))
         sa, deb, cred, sat = _extract_balancete_money(row)
 
@@ -672,7 +674,7 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
             "SaldoAtual": sat,
             "Estoque": "N", "AtivoImob": "N",
             "DepreciacaoAcumulativa": "N", "ContaFinanceira": "N",
-            "ReservaDeContigencia": "N", "Centro de Custos": None,
+            "ReservaDeContingência": "N", "Centro de Custos": None,
         })
 
     return parsed
@@ -744,11 +746,11 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                 parsed.append({
                     "REG": 1600,
                     "DATA": current_date,
-                    "CLASSIFICACAO": code,
-                    "DESCRICAO": name,
-                    "HISTORICO": historico,
-                    "DEBITO": decimal_to_float(debito_val),
-                    "CREDITO": 0.0 if debito_val is not None else None,
+                    "CLASSIFICAÇÃO": code,
+                    "DESCRIÇÃO": name,
+                    "HISTÓRICO": historico,
+                    "DÉBITO": decimal_to_float(debito_val),
+                    "CRÉDITO": 0.0,  # reference: CRÉDITO is always 0 (never null) on debit rows
                     "Centro de Custos": None,
                 })
 
@@ -757,11 +759,11 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                 parsed.append({
                     "REG": 1600,
                     "DATA": current_date,
-                    "CLASSIFICACAO": code,
-                    "DESCRICAO": name,
-                    "HISTORICO": historico,
-                    "DEBITO": None,
-                    "CREDITO": decimal_to_float(credito_val),
+                    "CLASSIFICAÇÃO": code,
+                    "DESCRIÇÃO": name,
+                    "HISTÓRICO": historico,
+                    "DÉBITO": None,  # reference: DÉBITO is always null on credit rows
+                    "CRÉDITO": decimal_to_float(credito_val),
                     "Centro de Custos": None,
                 })
 
@@ -840,12 +842,12 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             pending_record = {
                 "REG": 1700,
                 "NOME CONTA": current_account_name or "Sem conta",
-                "CONTA CONTABIL": current_account_code or "",
+                "CONTA CONTÁBIL": current_account_code or "",
                 "DATA": current_date,
                 "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
-                "HISTORICO": col20 or "Sem historico",
-                "DEBITO": decimal_to_float(debit),
-                "CREDITO": decimal_to_float(credit),
+                "HISTÓRICO": col20 or "Sem historico",
+                "DÉBITO": decimal_to_float(debit),
+                "CRÉDITO": decimal_to_float(credit),
                 "Saldo": decimal_to_float(saldo),
                 "Contra Partida": "",
             }
@@ -960,40 +962,66 @@ def write_records(sheet, parsed_sheet: dict) -> None:
 
 
 def style_output_sheet(sheet, parsed_sheet: dict, sheet_index: int) -> None:
-    sheet.sheet_view.showGridLines = False
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-
+    headers = parsed_sheet["headers"]
     last_row = sheet.max_row
     last_col = sheet.max_column
-    date_columns = parsed_sheet["date_columns"]
     money_columns = parsed_sheet["money_columns"]
     desc_col = parsed_sheet["description_column"]
 
-    for cell in sheet[1]:
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = THIN_BORDER
+    is_hcn = headers in (BALANCETE_HCN_HEADERS, DIARIO_HCN_HEADERS, RAZAO_HCN_HEADERS)
 
-    for row in range(2, last_row + 1):
-        for col in range(1, last_col + 1):
-            cell = sheet.cell(row=row, column=col)
+    if is_hcn:
+        # HCN: céluals planas, sem tabela, sem freeze — replicar estrutura do modelo de referência
+        if headers != DIARIO_HCN_HEADERS:
+            sheet.auto_filter.ref = sheet.dimensions
+
+        for cell in sheet[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for row in range(2, last_row + 1):
+            for col in range(1, last_col + 1):
+                cell = sheet.cell(row=row, column=col)
+                if col in money_columns:
+                    cell.number_format = ACCOUNTING_FORMAT
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                elif col == desc_col:
+                    cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+    else:
+        # Genérico: estilo decorado com tabela, freeze e preenchimento alternado
+        sheet.sheet_view.showGridLines = False
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+
+        date_columns = parsed_sheet["date_columns"]
+
+        for cell in sheet[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(vertical="center", wrap_text=(col == desc_col))
 
-            if row % 2 == 0:
-                cell.fill = ALT_ROW_FILL
+        for row in range(2, last_row + 1):
+            for col in range(1, last_col + 1):
+                cell = sheet.cell(row=row, column=col)
+                cell.border = THIN_BORDER
+                cell.alignment = Alignment(vertical="center", wrap_text=(col == desc_col))
 
-            if col in date_columns:
-                cell.number_format = "dd/mm/yyyy"
-            elif col in money_columns:
-                cell.number_format = '"R$ "#,##0.00'
-                cell.alignment = Alignment(horizontal="right", vertical="center")
+                if row % 2 == 0:
+                    cell.fill = ALT_ROW_FILL
 
-    highlight_total_rows(sheet, last_row, last_col, desc_col)
+                if col in date_columns:
+                    cell.number_format = "dd/mm/yyyy"
+                elif col in money_columns:
+                    cell.number_format = ACCOUNTING_FORMAT
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+
+        highlight_total_rows(sheet, last_row, last_col, desc_col)
+        create_table(sheet, last_row, last_col, sheet_index)
+
     adjust_column_widths(sheet, parsed_sheet)
-    create_table(sheet, last_row, last_col, sheet_index)
 
 
 def highlight_total_rows(sheet, last_row: int, last_col: int, desc_col: int) -> None:
@@ -1014,7 +1042,7 @@ def adjust_column_widths(sheet, parsed_sheet: dict) -> None:
     if headers == BALANCETE_HCN_HEADERS:
         widths = {1: 8, 2: 22, 3: 54, 4: 18, 5: 18, 6: 18, 7: 18, 8: 10, 9: 12, 10: 22, 11: 16, 12: 22, 13: 16}
     elif headers == DIARIO_HCN_HEADERS:
-        widths = {1: 8, 2: 10, 3: 26, 4: 40, 5: 60, 6: 18, 7: 18, 8: 16}
+        widths = {1: 9, 2: 11, 3: 22, 4: 57, 5: 96, 6: 25, 7: 18, 8: 22}
     elif headers == RAZAO_HCN_HEADERS:
         widths = {1: 8, 2: 44, 3: 22, 4: 16, 5: 18, 6: 56, 7: 18, 8: 18, 9: 18, 10: 22}
     else:
@@ -1040,9 +1068,14 @@ def create_table(sheet, last_row: int, last_col: int, sheet_index: int) -> None:
     sheet.add_table(table)
 
 
-def build_sheet_title(original_title: str, index: int) -> str:
-    base = re.sub(r"[^A-Za-z0-9]", "", original_title)[:20] or f"Planilha{index + 1}"
-    return f"Organizado{base}"[:31]
+def build_sheet_title(headers: list, index: int) -> str:
+    if headers == BALANCETE_HCN_HEADERS:
+        return "0300"
+    if headers == DIARIO_HCN_HEADERS:
+        return "1600"
+    if headers == RAZAO_HCN_HEADERS:
+        return "1700"
+    return f"Planilha{index + 1}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1153,6 +1186,9 @@ def parse_date_value(value: object) -> str | None:
     return None
 
 
+_US_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
 def parse_money_value(value: object) -> Decimal | None:
     if value is None or value == "":
         return None
@@ -1164,6 +1200,14 @@ def parse_money_value(value: object) -> Decimal | None:
     text = normalize_spaces(value)
     if not text:
         return None
+
+    # XLS/XLSX numeric cells converted to string via normalize_spaces() arrive in
+    # US dot-decimal format ("1234.56", "1200.0").  Handle these before the BR regex.
+    if _US_NUMBER_RE.match(text):
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            pass
 
     normalized = text.replace("R$", "").replace(" ", "")
     if not MONEY_RE.match(normalized):
@@ -1296,5 +1340,3 @@ def clean_diario_account(value: str) -> str:
     return normalize_spaces(cleaned)
 
 
-def is_account_code(value: str) -> bool:
-    return bool(re.match(r"^\d[\d\.]+$", value))
