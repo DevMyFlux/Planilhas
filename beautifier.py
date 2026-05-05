@@ -46,7 +46,7 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9E2F3"),
     bottom=Side(style="thin", color="D9E2F3"),
 )
-ACCOUNTING_FORMAT = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* "-"??_-;_-@_-'
+ACCOUNTING_FORMAT = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* #,##0.00_-;_-@_-'
 
 # ── Regexes ──────────────────────────────────────────────────────────────────
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -738,6 +738,12 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
             debito_val = parse_money_value(_safe_col(texts, col_debito_val))
             credito_val = parse_money_value(_safe_col(texts, col_credito_val))
 
+            # Linhas de continuação (texto quebrado) têm código sem dígito inicial — ignorar
+            if conta_debito and not re.match(r'^\d', conta_debito.strip()):
+                conta_debito = ""
+            if conta_credito and not re.match(r'^\d', conta_credito.strip()):
+                conta_credito = ""
+
             if not conta_debito and not conta_credito:
                 continue
 
@@ -750,7 +756,7 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                     "DESCRIÇÃO": name,
                     "HISTÓRICO": historico,
                     "DÉBITO": decimal_to_float(debito_val),
-                    "CRÉDITO": 0.0,  # reference: CRÉDITO is always 0 (never null) on debit rows
+                    "CRÉDITO": 0.0,
                     "Centro de Custos": None,
                 })
 
@@ -762,7 +768,7 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                     "CLASSIFICAÇÃO": code,
                     "DESCRIÇÃO": name,
                     "HISTÓRICO": historico,
-                    "DÉBITO": None,  # reference: DÉBITO is always null on credit rows
+                    "DÉBITO": None,
                     "CRÉDITO": decimal_to_float(credito_val),
                     "Centro de Custos": None,
                 })
