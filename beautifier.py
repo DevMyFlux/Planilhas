@@ -46,7 +46,11 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9E2F3"),
     bottom=Side(style="thin", color="D9E2F3"),
 )
-ACCOUNTING_FORMAT = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* #,##0.00_-;_-@_-'
+ACCOUNTING_FORMAT      = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* #,##0.00_-;_-@_-'
+# Razão: zero exibido como traço (-)
+ACCOUNTING_FORMAT_DASH = '_-* #,##0.00_-;\\-* #,##0.00_-;_-* "-"_-;_-@_-'
+# Razão SALDO ANTERIOR: prefixo R$, zero como traço
+ACCOUNTING_FORMAT_BRL  = '_-"R$ "* #,##0.00_-;\\-"R$ "* #,##0.00_-;_-"R$ "* "-"_-;_-@_-'
 
 # ── Regexes ──────────────────────────────────────────────────────────────────
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -478,7 +482,7 @@ def extract_records(rows: list[tuple]) -> dict | None:
                 "headers": RAZAO_HCN_HEADERS,
                 "rows": razao_rows,
                 "date_columns": set(),
-                "money_columns": {5, 7, 8, 9},
+                "money_columns": {4, 7, 8, 9},
                 "description_column": 6,
             }
 
@@ -1136,7 +1140,14 @@ def style_output_sheet(sheet, parsed_sheet: dict, sheet_index: int) -> None:
             for col in range(1, last_col + 1):
                 cell = sheet.cell(row=row, column=col)
                 if col in money_columns:
-                    cell.number_format = ACCOUNTING_FORMAT
+                    if headers == RAZAO_HCN_HEADERS:
+                        # SALDO ANTERIOR (col 4): R$ + zero como traço
+                        # DÉBITO/CRÉDITO/Saldo (cols 7/8/9): apenas zero como traço
+                        cell.number_format = (
+                            ACCOUNTING_FORMAT_BRL if col == 4 else ACCOUNTING_FORMAT_DASH
+                        )
+                    else:
+                        cell.number_format = ACCOUNTING_FORMAT
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 elif col == desc_col:
                     cell.alignment = Alignment(wrap_text=True, vertical="center")
