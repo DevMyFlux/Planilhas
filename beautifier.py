@@ -23,7 +23,7 @@ BALANCETE_HCN_HEADERS = [
 ]
 DIARIO_HCN_HEADERS = [
     "REG", "DATA", "CLASSIFICAÇÃO", "DESCRIÇÃO",
-    "HISTÓRICO", "DÉBITO", "CRÉDITO", "Centro de Custos",
+    "HISTÓRICO", "CRÉDITO", "DÉBITO", "Centro de Custos",
 ]
 RAZAO_HCN_HEADERS = [
     "REG", "NOME CONTA", "CONTA CONTÁBIL", "SALDO ANTERIOR", "DATA",
@@ -831,6 +831,42 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Razão parsing helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_razao_hist(texts: list[str]) -> str:
+    """Return the historico text from whichever column contains it.
+
+    TOTVS exports place the historico in different columns depending on the
+    export version: col 19, col 20 or col 21.  We check all three and return
+    the first non-empty value found.
+    """
+    for ci in (19, 20, 21):
+        v = _safe_col(texts, ci).strip()
+        if v:
+            return v
+    return ""
+
+
+def _find_saldo_anterior(texts: list[str]) -> Decimal | None:
+    """Locate the Saldo Anterior value in an account-header row.
+
+    The label "Saldo Anterior:" and its value appear at different column
+    positions across TOTVS export versions (e.g. cols 20/22 or 22/24).
+    We search for the label and read the first parseable money value that
+    follows it within a small window.
+    """
+    for ci, tv in enumerate(texts):
+        if normalize_text(tv) in {"saldo anterior:", "saldo anterior"}:
+            for cj in range(ci + 1, min(len(texts), ci + 5)):
+                v = parse_money_value(texts[cj])
+                if v is not None:
+                    return v
+            break
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Razão parsing
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -839,6 +875,7 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
     current_account_name = ""
     current_account_code = ""
     current_saldo_anterior: Decimal | None = None
+    running_saldo: Decimal | None = None   # Bug 2: accumulated per account
     current_date = ""
     pending_record: dict | None = None
     expecting_contra = False
@@ -855,7 +892,8 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             current_account_code, current_account_name = parse_razao_account_header(
                 _safe_col(pre_texts, 5)
             )
-            current_saldo_anterior = parse_money_value(_safe_col(pre_texts, 24))
+            current_saldo_anterior = _find_saldo_anterior(pre_texts)
+            running_saldo = current_saldo_anterior
         # Pre-populate the current date from the first date found in this sheet
         # so that continuation rows (before the account header) get a valid date.
         for _pre_row in rows:
@@ -877,10 +915,8 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
         col6  = _safe_col(texts, 6)
         col8  = _safe_col(texts, 8)
         col10 = _safe_col(texts, 10)
-        col13 = _safe_col(texts, 13)   # credit value (was col11 — wrong)
-        col17 = _safe_col(texts, 17)   # saldo     (was col16 — wrong)
-        col21 = _safe_col(texts, 21)   # histórico (was col20 — wrong)
-        col24 = _safe_col(texts, 24)
+        col13 = _safe_col(texts, 13)
+        col_hist = _extract_razao_hist(texts)  # Bug 1: checks cols 19, 20, 21
 
         # ── (1) Account header row (always checked first) ──────────────────
         if col1 in {"Conta Analitica:", "Conta Analítica:"}:
@@ -894,9 +930,12 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             if new_code != current_account_code:
                 pending_record = None
                 pending_historico = ""
+                # Bug 3: find saldo anterior dynamically — label position varies
+                # across TOTVS export versions (col 20 or col 22 in different files).
+                current_saldo_anterior = _find_saldo_anterior(texts)
+                running_saldo = current_saldo_anterior  # reset per-account accumulator
             current_account_code = new_code
             current_account_name = new_name
-            current_saldo_anterior = parse_money_value(col24)
             continue
 
         # ── (2) Account code row after Contrapartida: ──────────────────────
@@ -917,22 +956,26 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
 
         # ── (4) Contrapartida label row ────────────────────────────────────
         if col3 in {"Contrapartida:", "Contrapartida"}:
+            # Some TOTVS formats put the contra account code on the SAME row
+            # as the label (col5); capture it here before continuing.
+            if col5 and pending_record is not None and not pending_record["Contra Partida"]:
+                pending_record["Contra Partida"] = parse_razao_contra_code(col5)
             # A real Contrapartida row always has monetary values in col6/col10.
-            # Rows with only col21 text (no amounts) are page-break continuation
-            # fragments of the previous historico and must NOT trigger the logic.
+            # Rows with only text (no amounts) are page-break continuation
+            # fragments of the previous historico and must NOT trigger the flag.
             if parse_money_value(col6) is not None or parse_money_value(col10) is not None:
                 expecting_contra = True
             continue
 
         debit  = parse_money_value(col8)
         credit = parse_money_value(col13)
-        saldo  = parse_money_value(col17)
 
         # ── (4b) Standalone historico row (text only, no date, no amounts) ─
-        # TOTVS places the historico text on a dedicated row BEFORE the
-        # transaction row; the transaction row itself has no historico column.
-        if col21 and debit is None and credit is None and saldo is None and not parse_date_value(col1):
-            pending_historico = col21.strip()
+        # Bug 1: TOTVS places the historico text in col 19, 20 or 21 on a
+        # dedicated row BEFORE the transaction row (sometimes with an empty
+        # row between them).  We capture it here as pending_historico.
+        if col_hist and debit is None and credit is None and not parse_date_value(col1):
+            pending_historico = col_hist
             continue
 
         # ── (5) Transaction row ────────────────────────────────────────────
@@ -940,9 +983,13 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
         if row_date:
             current_date = row_date
 
-        if debit is not None or credit is not None or saldo is not None:
-            historico = col21.strip() if col21.strip() else pending_historico
+        if debit is not None or credit is not None:
+            historico = col_hist or pending_historico
             pending_historico = ""
+            # Bug 2: calculate running saldo instead of reading from XLS column
+            d = debit  if debit  is not None else Decimal(0)
+            c = credit if credit is not None else Decimal(0)
+            running_saldo = (running_saldo if running_saldo is not None else Decimal(0)) + d - c
             pending_record = {
                 "REG": 1700,
                 "NOME CONTA": current_account_name or "Sem conta",
@@ -952,7 +999,7 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
                 "HISTÓRICO": historico or "Sem historico",
                 "DÉBITO": decimal_to_float(debit),
                 "CRÉDITO": decimal_to_float(credit),
-                "Saldo": decimal_to_float(saldo),
+                "Saldo": decimal_to_float(running_saldo),
                 "Contra Partida": "",
                 "Centro de Custos": None,
             }
