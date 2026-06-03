@@ -26,8 +26,8 @@ DIARIO_HCN_HEADERS = [
     "HISTÓRICO", "DÉBITO", "CRÉDITO", "Centro de Custos",
 ]
 RAZAO_HCN_HEADERS = [
-    "REG", "NOME CONTA", "CONTA CONTÁBIL", "DATA",
-    "SALDO ANTERIOR", "HISTÓRICO", "DÉBITO", "CRÉDITO", "Saldo", "Contra Partida",
+    "REG", "NOME CONTA", "CONTA CONTÁBIL", "SALDO ANTERIOR", "DATA",
+    "HISTÓRICO", "DÉBITO", "CRÉDITO", "Saldo", "Contra Partida", "Centro de Custos",
 ]
 
 DEFAULT_OUTPUT_HEADERS = ["Data", "Descricao", "Debito", "Credito", "Saldo"]
@@ -202,11 +202,13 @@ def _diario_sheet(rows: list[dict]) -> dict:
 
 
 def _razao_sheet(rows: list[dict]) -> dict:
+    # Col positions (1-indexed): REG=1 NOME CONTA=2 CONTA=3 SALDO_ANT=4 DATA=5
+    # HISTÓRICO=6 DÉBITO=7 CRÉDITO=8 Saldo=9 Contra Partida=10 Centro=11
     return {
         "headers": RAZAO_HCN_HEADERS,
         "rows": rows,
         "date_columns": set(),
-        "money_columns": {5, 7, 8, 9},
+        "money_columns": {4, 7, 8, 9},
         "description_column": 6,
     }
 
@@ -409,13 +411,14 @@ def parse_razao_pdf(pdf) -> list[dict]:
                     "REG": 1700,
                     "NOME CONTA": current_account_name or "Sem conta",
                     "CONTA CONTÁBIL": current_account_code or "",
-                    "DATA": current_date,
                     "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
+                    "DATA": current_date,
                     "HISTÓRICO": "Sem historico",
                     "DÉBITO": decimal_to_float(parse_money_value(values[0])) if len(values) > 0 else None,
                     "CRÉDITO": decimal_to_float(parse_money_value(values[1])) if len(values) > 1 else None,
                     "Saldo": decimal_to_float(parse_money_value(values[2])) if len(values) > 2 else None,
                     "Contra Partida": "",
+                    "Centro de Custos": None,
                 }
                 rows.append(pending_record)
                 continue
@@ -613,12 +616,22 @@ def detect_diario_layout(rows: list[list]) -> dict | None:
         }
         if all(v is not None for v in columns.values()):
             columns["header_index"] = index
+            # Detect optional description columns immediately after account code columns.
+            # TOTVS exports often have the account name in the column right after the code.
+            detected_set = {v for v in columns.values() if v is not None}
+            col_d = columns["conta_debito"]
+            col_c = columns["conta_credito"]
+            columns["desc_debito"] = (col_d + 1) if (col_d + 1) not in detected_set else None
+            columns["desc_credito"] = (col_c + 1) if (col_c + 1) not in detected_set else None
             return columns
     return None
 
 
 def detect_razao_layout(rows: list[list]) -> dict | None:
-    for index in range(min(len(rows), 20)):
+    # Search up to 60 rows — TOTVS repeats the account header on each new XLS
+    # sheet (when the 65534-row XLS limit is hit), so the header may appear
+    # well past row 0 on continuation sheets.
+    for index in range(min(len(rows), 60)):
         norm_row = [normalize_text(v) for v in rows[index]]
         if "conta analitica:" in norm_row or "conta analitica" in norm_row:
             return {"account_header_index": index}
@@ -704,9 +717,16 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
     Process ALL non-empty rows (including date headers and repeated column headers).
     Each XLS sub-row (debit side OR credit side) becomes one HCN output row.
     Combined rows (both sides in one row) are split into two output rows.
+
+    TOTVS sometimes puts the debit account on one row and the credit account on the
+    next row, omitting the Histórico and the account name on the secondary row.
+    We carry those forward from the most recent non-empty values.
     """
     parsed: list[dict] = []
     current_date = ""
+    last_historico = ""          # carry-forward: TOTVS omits historico on credit-only rows
+    last_debito_name = ""        # carry-forward: debit account name for complement rows
+    last_credito_name = ""       # carry-forward: credit account name for complement rows
 
     col_lote = columns["lote"]
     col_debito_conta = columns["conta_debito"]
@@ -714,6 +734,9 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
     col_historico = columns["historico"]
     col_debito_val = columns["debito"]
     col_credito_val = columns["credito"]
+    # Optional: column immediately after each account code column may hold the account name
+    col_debito_desc = columns.get("desc_debito")
+    col_credito_desc = columns.get("desc_credito")
 
     for row in rows:
         texts = [normalize_spaces(v) for v in row]
@@ -732,13 +755,24 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
             if normalize_text(lote_text) == "lote":
                 continue
 
+            # Skip continuation/footer rows that have no lote value
+            if not lote_text:
+                continue
+
             conta_debito = _safe_col(texts, col_debito_conta)
             conta_credito = _safe_col(texts, col_credito_conta)
-            historico = _safe_col(texts, col_historico) or "Sem historico"
+
+            # Histórico: use carry-forward when the current row's column is empty.
+            # TOTVS only writes the historico on the main (first) row of each movement.
+            raw_historico = _safe_col(texts, col_historico)
+            if raw_historico:
+                last_historico = raw_historico
+            historico = raw_historico or last_historico or "Sem historico"
+
             debito_val = parse_money_value(_safe_col(texts, col_debito_val))
             credito_val = parse_money_value(_safe_col(texts, col_credito_val))
 
-            # Linhas de continuação (texto quebrado) têm código sem dígito inicial — ignorar
+            # Continuation rows: account code must start with a digit
             if conta_debito and not re.match(r'^\d', conta_debito.strip()):
                 conta_debito = ""
             if conta_credito and not re.match(r'^\d', conta_credito.strip()):
@@ -749,6 +783,16 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
 
             if conta_debito:
                 code, name = split_account_field(conta_debito)
+                # Account name may live in the adjacent column (TOTVS format)
+                if not name and col_debito_desc is not None:
+                    adj = _safe_col(texts, col_debito_desc)
+                    if adj and parse_money_value(adj) is None:
+                        name = adj
+                # Carry forward the debit account name if still missing
+                if not name:
+                    name = last_debito_name
+                elif name:
+                    last_debito_name = name
                 parsed.append({
                     "REG": 1600,
                     "DATA": current_date,
@@ -762,6 +806,16 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
 
             if conta_credito:
                 code, name = split_account_field(conta_credito)
+                # Account name may live in the adjacent column (TOTVS format)
+                if not name and col_credito_desc is not None:
+                    adj = _safe_col(texts, col_credito_desc)
+                    if adj and parse_money_value(adj) is None:
+                        name = adj
+                # Carry forward the credit account name if still missing
+                if not name:
+                    name = last_credito_name
+                elif name:
+                    last_credito_name = name
                 parsed.append({
                     "REG": 1600,
                     "DATA": current_date,
@@ -788,40 +842,71 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
     current_date = ""
     pending_record: dict | None = None
     expecting_contra = False
+    pending_historico = ""  # historico lives on a standalone row before the transaction row
 
-    for row in rows[layout["account_header_index"]:]:
+    start_idx = layout["account_header_index"]
+    # When a sheet begins with continuation rows (before its first account
+    # header), pre-populate the account context from that header so those
+    # rows receive the correct account code and name.
+    if start_idx > 0:
+        pre = rows[start_idx]
+        pre_texts = [normalize_spaces(v) for v in pre]
+        if _safe_col(pre_texts, 1) in {"Conta Analitica:", "Conta Analítica:"}:
+            current_account_code, current_account_name = parse_razao_account_header(
+                _safe_col(pre_texts, 5)
+            )
+            current_saldo_anterior = parse_money_value(_safe_col(pre_texts, 24))
+        # Pre-populate the current date from the first date found in this sheet
+        # so that continuation rows (before the account header) get a valid date.
+        for _pre_row in rows:
+            _pre_date = parse_date_value(_safe_col([normalize_spaces(v) for v in _pre_row], 1))
+            if _pre_date:
+                current_date = _pre_date
+                break
+
+    for row in rows:
         texts = [normalize_spaces(v) for v in row]
         non_empty_vals = [v for v in texts if v]
 
         if not non_empty_vals:
             continue
 
-        col1 = _safe_col(texts, 1)
-        col3 = _safe_col(texts, 3)
-        col5 = _safe_col(texts, 5)
-        col8 = _safe_col(texts, 8)
-        col11 = _safe_col(texts, 11)
-        col16 = _safe_col(texts, 16)
-        col20 = _safe_col(texts, 20)
+        col1  = _safe_col(texts, 1)
+        col3  = _safe_col(texts, 3)
+        col5  = _safe_col(texts, 5)
+        col6  = _safe_col(texts, 6)
+        col8  = _safe_col(texts, 8)
+        col10 = _safe_col(texts, 10)
+        col13 = _safe_col(texts, 13)   # credit value (was col11 — wrong)
+        col17 = _safe_col(texts, 17)   # saldo     (was col16 — wrong)
+        col21 = _safe_col(texts, 21)   # histórico (was col20 — wrong)
         col24 = _safe_col(texts, 24)
 
         # ── (1) Account header row (always checked first) ──────────────────
         if col1 in {"Conta Analitica:", "Conta Analítica:"}:
             expecting_contra = False
-            current_account_code, current_account_name = parse_razao_account_header(col5)
+            new_code, new_name = parse_razao_account_header(col5)
+            # When TOTVS breaks a page it reprints the same account header.
+            # If the account code changes we start a fresh context; if it is the
+            # same account (repeated page header) we keep pending_record and
+            # pending_historico so the Contrapartida/historico on the next page
+            # can still be linked to the transaction on the previous page.
+            if new_code != current_account_code:
+                pending_record = None
+                pending_historico = ""
+            current_account_code = new_code
+            current_account_name = new_name
             current_saldo_anterior = parse_money_value(col24)
-            pending_record = None
             continue
 
         # ── (2) Account code row after Contrapartida: ──────────────────────
         if expecting_contra:
-            # If this row has a parseable date or is a Contrapartida label itself,
-            # it is NOT the account-code row – reset the flag and fall through.
             if parse_date_value(col1) is not None or col3 in {"Contrapartida:", "Contrapartida"}:
                 expecting_contra = False
                 # fall through to date/transaction handling below
             else:
-                if col5 and pending_record is not None:
+                # Only store the FIRST contra partida; subsequent ones are ignored.
+                if col5 and pending_record is not None and not pending_record["Contra Partida"]:
                     pending_record["Contra Partida"] = parse_razao_contra_code(col5)
                 expecting_contra = False
                 continue
@@ -832,30 +917,44 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
 
         # ── (4) Contrapartida label row ────────────────────────────────────
         if col3 in {"Contrapartida:", "Contrapartida"}:
-            expecting_contra = True
+            # A real Contrapartida row always has monetary values in col6/col10.
+            # Rows with only col21 text (no amounts) are page-break continuation
+            # fragments of the previous historico and must NOT trigger the logic.
+            if parse_money_value(col6) is not None or parse_money_value(col10) is not None:
+                expecting_contra = True
             continue
 
-        # ── (5) Transaction row (has date or carries current date) ─────────
+        debit  = parse_money_value(col8)
+        credit = parse_money_value(col13)
+        saldo  = parse_money_value(col17)
+
+        # ── (4b) Standalone historico row (text only, no date, no amounts) ─
+        # TOTVS places the historico text on a dedicated row BEFORE the
+        # transaction row; the transaction row itself has no historico column.
+        if col21 and debit is None and credit is None and saldo is None and not parse_date_value(col1):
+            pending_historico = col21.strip()
+            continue
+
+        # ── (5) Transaction row ────────────────────────────────────────────
         row_date = parse_date_value(col1)
         if row_date:
             current_date = row_date
 
-        debit = parse_money_value(col8)
-        credit = parse_money_value(col11)
-        saldo = parse_money_value(col16)
-
         if debit is not None or credit is not None or saldo is not None:
+            historico = col21.strip() if col21.strip() else pending_historico
+            pending_historico = ""
             pending_record = {
                 "REG": 1700,
                 "NOME CONTA": current_account_name or "Sem conta",
                 "CONTA CONTÁBIL": current_account_code or "",
-                "DATA": current_date,
                 "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
-                "HISTÓRICO": col20 or "Sem historico",
+                "DATA": current_date,
+                "HISTÓRICO": historico or "Sem historico",
                 "DÉBITO": decimal_to_float(debit),
                 "CRÉDITO": decimal_to_float(credit),
                 "Saldo": decimal_to_float(saldo),
                 "Contra Partida": "",
+                "Centro de Custos": None,
             }
             parsed.append(pending_record)
 
@@ -1050,7 +1149,8 @@ def adjust_column_widths(sheet, parsed_sheet: dict) -> None:
     elif headers == DIARIO_HCN_HEADERS:
         widths = {1: 9, 2: 11, 3: 22, 4: 57, 5: 96, 6: 25, 7: 18, 8: 22}
     elif headers == RAZAO_HCN_HEADERS:
-        widths = {1: 8, 2: 44, 3: 22, 4: 16, 5: 18, 6: 56, 7: 18, 8: 18, 9: 18, 10: 22}
+        # REG NOME_CONTA CONTA SALDO_ANT DATA HISTÓRICO DÉBITO CRÉDITO Saldo ContraP CentroCusto
+        widths = {1: 8, 2: 44, 3: 22, 4: 18, 5: 16, 6: 56, 7: 18, 8: 18, 9: 18, 10: 22, 11: 18}
     else:
         widths = {1: 14, 2: 60, 3: 16, 4: 16, 5: 16}
     for col_idx, width in widths.items():
@@ -1103,11 +1203,16 @@ def parse_pt_date_header(text: str) -> str | None:
 
 
 def split_account_field(text: str) -> tuple[str, str]:
-    """Split 'CODE - NAME' into (code, name). Handles missing dash gracefully."""
+    """Split 'CODE - NAME' into (code, name). Handles trailing dash with no name."""
     stripped = text.strip()
+    # Full format: "CODE - NAME"
     m = re.match(r"^([\d.]+)\s*-\s*(.+)$", stripped)
     if m:
         return m.group(1).strip(), m.group(2).strip()
+    # Code only, with or without trailing dash: "CODE -" or "CODE"
+    m2 = re.match(r"^([\d.]+)\s*-?\s*$", stripped)
+    if m2:
+        return m2.group(1).strip(), ""
     return stripped, stripped
 
 
