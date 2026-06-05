@@ -3,4 +3,5 @@
 # Uses Gunicorn instead of Flask's built-in development server.
 set -euo pipefail
 
-exec gunicorn wsgi:app --workers 4 --worker-class sync --timeout 120 --max-requests 200
+PORT="${PORT:-5000}"
+exec gunicorn wsgi:app --config gunicorn.conf.py --bind "0.0.0.0:${PORT}"

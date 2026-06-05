@@ -19,7 +19,6 @@ app.config["SECRET_KEY"] = "excel-bonito-secret"
 # Stream uploads to disk instead of buffering in memory.
 # Werkzeug will spool anything above this threshold to a temp file.
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB hard limit
-app.config["MAX_FORM_MEMORY_SIZE"] = 0  # always spool to disk
 
 
 def is_allowed_file(filename: str) -> bool:
