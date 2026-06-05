@@ -82,9 +82,10 @@ HEADER_ALIASES = {
 # Public entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def beautify_workbook(file_stream: BytesIO, input_extension: str = ".xlsx") -> BytesIO:
+def beautify_workbook(file_path: str, input_extension: str = ".xlsx") -> BytesIO:
     if input_extension == ".pdf":
-        return beautify_pdf(file_stream)
+        with open(file_path, "rb") as fh:
+            return beautify_pdf(BytesIO(fh.read()))
 
     output_workbook = Workbook()
     output_workbook.remove(output_workbook.active)
@@ -94,7 +95,7 @@ def beautify_workbook(file_stream: BytesIO, input_extension: str = ".xlsx") -> B
     merged: dict[tuple, tuple[str, dict, list]] = {}
     order: list[tuple] = []  # insertion order to preserve sheet ordering
 
-    for original_title, rows in read_input_sheets(file_stream, input_extension):
+    for original_title, rows in read_input_sheets(file_path, input_extension):
         parsed_sheet = extract_records(rows)
         if not parsed_sheet:
             continue
@@ -512,14 +513,15 @@ def extract_records(rows: list[tuple]) -> dict | None:
     return None
 
 
-def read_input_sheets(file_stream: BytesIO, input_extension: str) -> list[tuple[str, list[tuple]]]:
-    file_stream.seek(0)
-
+def read_input_sheets(file_path: str, input_extension: str) -> list[tuple[str, list[tuple]]]:
     if input_extension == ".pdf":
-        return read_pdf_sheets(file_stream)
+        with open(file_path, "rb") as fh:
+            return read_pdf_sheets(BytesIO(fh.read()))
 
     if input_extension == ".xls":
-        workbook = xlrd.open_workbook(file_contents=file_stream.getvalue())
+        with open(file_path, "rb") as fh:
+            file_contents = fh.read()
+        workbook = xlrd.open_workbook(file_contents=file_contents)
         sheets: list[tuple[str, list[tuple]]] = []
         for sheet in workbook.sheets():
             rows = []
@@ -537,11 +539,26 @@ def read_input_sheets(file_stream: BytesIO, input_extension: str) -> list[tuple[
             sheets.append((sheet.name, rows))
         return sheets
 
-    workbook = load_workbook(file_stream, data_only=True, keep_vba=input_extension == ".xlsm")
-    return [
-        (sheet.title, list(sheet.iter_rows(values_only=True)))
-        for sheet in workbook.worksheets
-    ]
+    # Use read_only=True so openpyxl streams rows from the zip archive one at a
+    # time rather than deserialising the entire workbook into memory up front.
+    # keep_vba is incompatible with read_only mode, so fall back for .xlsm.
+    if input_extension == ".xlsm":
+        workbook = load_workbook(file_path, data_only=True, keep_vba=True)
+        sheets_data = [
+            (sheet.title, list(sheet.iter_rows(values_only=True)))
+            for sheet in workbook.worksheets
+        ]
+        workbook.close()
+        return sheets_data
+
+    workbook = load_workbook(file_path, data_only=True, read_only=True)
+    try:
+        return [
+            (sheet.title, list(sheet.iter_rows(values_only=True)))
+            for sheet in workbook.worksheets
+        ]
+    finally:
+        workbook.close()
 
 
 def read_pdf_sheets(file_stream: BytesIO) -> list[tuple[str, list[tuple]]]:
