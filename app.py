@@ -1,4 +1,6 @@
 from io import BytesIO
+import os
+import tempfile
 import traceback
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +16,10 @@ ALLOWED_EXTENSIONS = {".pdf", ".xls", ".xlsx", ".xlsm"}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "excel-bonito-secret"
+# Stream uploads to disk instead of buffering in memory.
+# Werkzeug will spool anything above this threshold to a temp file.
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB hard limit
+app.config["MAX_FORM_MEMORY_SIZE"] = 0  # always spool to disk
 
 
 def is_allowed_file(filename: str) -> bool:
@@ -41,19 +47,31 @@ def upload_file():
     original_extension = Path(original_name).suffix.lower()
     output_name = f"{Path(original_name).stem}_organizado_{uuid4().hex[:8]}.xlsx"
 
-    workbook_bytes = BytesIO(uploaded_file.read())
+    # Write the upload to a named temp file so the file is never fully held
+    # in process memory — the OS page cache handles buffering instead.
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=original_extension)
     try:
-        output_stream = beautify_workbook(workbook_bytes, input_extension=original_extension)
-    except InvalidFileException:
-        flash("Nao foi possivel abrir esse arquivo. Confira se ele e um Excel valido.")
-        return redirect(url_for("index"))
-    except ValueError as exc:
-        flash(str(exc))
-        return redirect(url_for("index"))
-    except Exception:
-        traceback.print_exc()
-        flash("O arquivo foi lido, mas houve um erro inesperado ao organizar a planilha.")
-        return redirect(url_for("index"))
+        with os.fdopen(tmp_fd, "wb") as tmp_file:
+            uploaded_file.save(tmp_file)
+
+        try:
+            output_stream = beautify_workbook(tmp_path, input_extension=original_extension)
+        except InvalidFileException:
+            flash("Nao foi possivel abrir esse arquivo. Confira se ele e um Excel valido.")
+            return redirect(url_for("index"))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("index"))
+        except Exception:
+            traceback.print_exc()
+            flash("O arquivo foi lido, mas houve um erro inesperado ao organizar a planilha.")
+            return redirect(url_for("index"))
+    finally:
+        # Always remove the temp file, even if processing raised an exception.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
     output_stream.seek(0)
 
