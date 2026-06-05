@@ -28,3 +28,12 @@ loglevel = "info"
 # memory that leaked during spreadsheet processing.
 max_requests = 200
 max_requests_jitter = 40
+
+# ── Request size limits ────────────────────────────────────────────────────────
+# By default Gunicorn enforces conservative limits that cause HTTP 413 errors
+# for large file uploads before the request even reaches Flask.  Set all three
+# to 0 (unlimited) so that Flask's own MAX_CONTENT_LENGTH = 50 MB is the sole
+# gatekeeper.
+limit_request_line = 0
+limit_request_fields = 0
+limit_request_field_size = 0
