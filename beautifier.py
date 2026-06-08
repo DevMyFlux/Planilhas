@@ -945,7 +945,7 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
                 current_date = _pre_date
                 break
 
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         texts = [normalize_spaces(v) for v in row]
         non_empty_vals = [v for v in texts if v]
 
@@ -991,6 +991,11 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
                 # Only store the FIRST contra partida; subsequent ones are ignored.
                 if col5 and pending_record is not None and not pending_record["Contra Partida"]:
                     pending_record["Contra Partida"] = parse_razao_contra_code(col5)
+                # B1: when there is no blank line between the Contrapartida block and
+                # the next historico row, the historico row is consumed here.  Capture it
+                # so the following transaction can still use it.
+                if col_hist and not col5.strip():
+                    pending_historico = col_hist_raw
                 expecting_contra = False
                 continue
 
@@ -1029,6 +1034,10 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
         if debit is not None or credit is not None:
             historico = pending_historico or col_hist_raw
             pending_historico = ""
+            # B2: if historico ends with a trailing space it was truncated in the source.
+            # Look ahead for a Contrapartida col19 or an isolated 2nd-part row.
+            if historico.endswith(' '):
+                historico = _completar_historico(rows, row_idx, historico)
             d = debit  if debit  is not None else Decimal(0)
             c = credit if credit is not None else Decimal(0)
             saldo_base = running_saldo if running_saldo is not None else Decimal(0)
@@ -1284,6 +1293,43 @@ def build_sheet_title(headers: list, index: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper / utility functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _completar_historico(rows: list[list], start_idx: int, hist: str) -> str:
+    """Tenta completar um histórico truncado (termina com espaço) olhando adiante.
+
+    Estratégia:
+      1. Busca linha de Contrapartida (col3) nas próximas 12 linhas e usa col19 se
+         for mais longa.
+      2. Se ainda não resolvido, busca linha isolada com col19 mas sem col1/col3/col8
+         (padrão da 2ª parte no bloco seguinte) e concatena.
+    """
+    best = hist.rstrip()
+
+    for offset in range(1, 13):
+        idx = start_idx + offset
+        if idx >= len(rows):
+            break
+        ahead_texts = [normalize_spaces(v) for v in rows[idx]]
+        ahead_col3 = _safe_col(ahead_texts, 3)
+
+        if ahead_col3 in {"Contrapartida:", "Contrapartida"}:
+            cp = _extract_razao_hist_raw(rows[idx]).strip()
+            if cp and len(cp) > len(best):
+                best = cp
+            break
+
+        # Linha isolada: tem col19 mas não tem col1, col3 nem col8
+        ahead_col1 = _safe_col(ahead_texts, 1)
+        ahead_col8 = _safe_col(ahead_texts, 8)
+        parte2_raw = _extract_razao_hist_raw(rows[idx])
+        if parte2_raw.strip() and not ahead_col1.strip() and not ahead_col3.strip() and not ahead_col8.strip():
+            parte2 = parte2_raw.strip()
+            if parte2 and normalize_text(parte2) != 'historico padrao':
+                best = best + ' ' + parte2
+                break
+
+    return best if best else hist.rstrip()
+
 
 def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal,
                     conta: str, nome: str = '') -> Decimal:
