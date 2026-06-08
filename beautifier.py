@@ -1307,13 +1307,20 @@ def build_sheet_title(headers: list, index: int) -> str:
 def _completar_historico(rows: list[list], start_idx: int, hist: str) -> str:
     """Tenta completar um histórico truncado (termina com espaço) via Contrapartidas.
 
-    Varre TODAS as linhas de Contrapartida dentro do mesmo bloco (para ao encontrar
-    nova DATA ou novo cabeçalho de conta) e retorna a col19 mais longa encontrada.
-    Nunca cruza a fronteira do bloco para evitar capturar histórico do lançamento
-    seguinte.
+    Varre as linhas de Contrapartida dentro do mesmo bloco.
+    Condições de parada:
+      1. Nova DATA em col1 → início de novo lançamento.
+      2. "Conta Analítica:" em col1 → cabeçalho de nova conta.
+      3. Após ao menos uma CP encontrada (cp_found), qualquer linha com col19
+         preenchida e sem marcador de Contrapartida → é o histórico antecipado
+         do próximo lançamento; não deve ser capturado.
+    A condição 3 impede que a busca ultrapasse o código da conta (col5) do bloco
+    atual e chegue à linha de histórico do bloco seguinte, que fica 1-2 linhas
+    após o último código de contra-partida.
     """
     hist_base = hist.rstrip()
     best = hist_base
+    cp_found = False
 
     for offset in range(1, 13):
         idx = start_idx + offset
@@ -1321,18 +1328,24 @@ def _completar_historico(rows: list[list], start_idx: int, hist: str) -> str:
             break
         ahead_texts = [normalize_spaces(v) for v in rows[idx]]
         ahead_col1 = _safe_col(ahead_texts, 1)
+        ahead_col3 = _safe_col(ahead_texts, 3)
 
-        # Parar ao cruzar fronteira do bloco
+        # Parar ao cruzar fronteira do bloco (condições 1 e 2)
         if parse_date_value(ahead_col1) is not None:
             break
         if ahead_col1 in {"Conta Analitica:", "Conta Analítica:"}:
             break
 
-        if _safe_col(ahead_texts, 3) in {"Contrapartida:", "Contrapartida"}:
+        if ahead_col3 in {"Contrapartida:", "Contrapartida"}:
+            cp_found = True
             cp = _extract_razao_hist_raw(rows[idx]).strip()
             if cp and len(cp) > len(best):
                 best = cp
             # Continuar — pode haver mais CPs no bloco (ex: 2 CPs para o mesmo lançamento)
+        elif cp_found and _extract_razao_hist_raw(rows[idx]).strip():
+            # Condição 3: linha com col19 preenchida após o bloco de CPs
+            # = histórico do próximo lançamento → parar imediatamente.
+            break
 
     return best if best else hist_base
 
