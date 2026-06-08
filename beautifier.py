@@ -1027,12 +1027,12 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             current_date = row_date
 
         if debit is not None or credit is not None:
-            historico = col_hist_raw or pending_historico
+            historico = pending_historico or col_hist_raw
             pending_historico = ""
             d = debit  if debit  is not None else Decimal(0)
             c = credit if credit is not None else Decimal(0)
             saldo_base = running_saldo if running_saldo is not None else Decimal(0)
-            running_saldo = _calcular_saldo(saldo_base, d, c, current_account_code)
+            running_saldo = _calcular_saldo(saldo_base, d, c, current_account_code, current_account_name)
             pending_record = {
                 "REG": 1700,
                 "NOME CONTA": current_account_name or "Sem conta",
@@ -1285,14 +1285,18 @@ def build_sheet_title(headers: list, index: int) -> str:
 # Helper / utility functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal, conta: str) -> Decimal:
+def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal,
+                    conta: str, nome: str = '') -> Decimal:
     """Acumula saldo respeitando a natureza contábil da conta.
 
     Passivo (grupo 2) e Receitas (3.2.1.01.x): crédito aumenta → ant - D + C.
     Ativo (grupo 1) e Despesas: débito aumenta → ant + D - C.
+    Contas retificadoras (nome começa com "(-)") invertem a lógica do grupo.
     """
     grupo = conta.strip().split('.')[0] if conta.strip() else ''
-    if grupo == '2' or conta.strip().startswith('3.2.1.01'):
+    is_retificadora = nome.strip().upper().startswith('(-)')
+    natureza_cd = (grupo == '2' or conta.strip().startswith('3.2.1.01'))
+    if natureza_cd ^ is_retificadora:   # XOR: retificadora inverte a natureza
         return saldo_ant - d + c
     return saldo_ant + d - c
 
