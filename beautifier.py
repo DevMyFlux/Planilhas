@@ -23,7 +23,7 @@ BALANCETE_HCN_HEADERS = [
 ]
 DIARIO_HCN_HEADERS = [
     "REG", "DATA", "CLASSIFICAÇÃO", "DESCRIÇÃO",
-    "HISTÓRICO", "CRÉDITO", "DÉBITO", "Centro de Custos",
+    "HISTÓRICO", "DÉBITO", "CRÉDITO", "Centro de Custos", "Mov",
 ]
 RAZAO_HCN_HEADERS = [
     "REG", "NOME CONTA", "CONTA CONTÁBIL", "SALDO ANTERIOR", "DATA",
@@ -628,10 +628,10 @@ def detect_diario_layout(rows: list[list]) -> dict | None:
         norm_row = [normalize_text(v) for v in rows[index]]
         columns = {
             "lote": find_header_index(norm_row, {"lote"}),
-            "nr_mvto": find_header_index(norm_row, {"nr. mvto", "nr mvto"}),
-            "conta_debito": find_header_index(norm_row, {"cont. debito", "cont debito"}),
-            "conta_credito": find_header_index(norm_row, {"cont. credito", "cont credito"}),
-            "historico": find_header_index(norm_row, {"historico", "historico"}),
+            "nr_mvto": find_header_index(norm_row, {"nr. mvto", "nr mvto", "nr.mvto"}),
+            "conta_debito": find_header_index(norm_row, {"cont. debito", "cont debito", "conta debito"}),
+            "conta_credito": find_header_index(norm_row, {"cont. credito", "cont credito", "conta credito"}),
+            "historico": find_header_index(norm_row, {"historico"}),
             "debito": find_header_index(norm_row, {"valor debito", "debito"}),
             "credito": find_header_index(norm_row, {"valor credito", "credito"}),
         }
@@ -684,18 +684,22 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
 
     for row in rows[columns["header_index"] + 1:]:
         conta = normalize_spaces(get_value(row, columns["conta"]))
-        # Auxiliary (per-vendor) detail rows ("Conta Aux.:") must not appear in output.
-        # Also skip any TOTVS noise labels (Total:, Subtotal:, etc.).
         conta_norm = normalize_text(conta)
         if conta_norm.startswith("conta aux") or conta_norm.startswith("total") or conta_norm.startswith("subtotal"):
             continue
 
         descricao = normalize_spaces(get_value(row, columns["descricao"]))
-        sa, deb, cred, sat = _extract_balancete_money(row)
+
+        # Use column-specific positions detected by detect_balancete_layout so that
+        # intermediate parent-account rows with unusual cell counts are not missed.
+        sa   = parse_money_value(get_value(row, columns["saldo_anterior"]))
+        deb  = parse_money_value(get_value(row, columns["debito"]))
+        cred = parse_money_value(get_value(row, columns["credito"]))
+        sat  = parse_money_value(get_value(row, columns["saldo_atual"]))
 
         if normalize_text(conta) == "conta" or normalize_text(descricao) == "descricao":
             continue
-        if not any([conta, descricao, sa, deb, cred, sat]):
+        if not conta and not descricao and sa is None and deb is None and cred is None and sat is None:
             continue
 
         parsed.append({
@@ -750,6 +754,7 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
     last_credito_name = ""       # carry-forward: credit account name for complement rows
 
     col_lote = columns["lote"]
+    col_nr_mvto = columns.get("nr_mvto")
     col_debito_conta = columns["conta_debito"]
     col_credito_conta = columns["conta_credito"]
     col_historico = columns["historico"]
@@ -793,6 +798,16 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
             debito_val = parse_money_value(_safe_col(texts, col_debito_val))
             credito_val = parse_money_value(_safe_col(texts, col_credito_val))
 
+            # Nr.Mvto — same value for both the debit and credit rows of one lançamento.
+            mov_val = None
+            if col_nr_mvto is not None:
+                raw_mov = _safe_col(texts, col_nr_mvto)
+                if raw_mov:
+                    try:
+                        mov_val = int(float(raw_mov))
+                    except (ValueError, TypeError):
+                        mov_val = raw_mov
+
             # Continuation rows: account code must start with a digit
             if conta_debito and not re.match(r'^\d', conta_debito.strip()):
                 conta_debito = ""
@@ -823,6 +838,7 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                     "DÉBITO": decimal_to_float(debito_val),
                     "CRÉDITO": 0.0,
                     "Centro de Custos": None,
+                    "Mov": mov_val,
                 })
 
             if conta_credito:
@@ -846,6 +862,7 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
                     "DÉBITO": None,
                     "CRÉDITO": decimal_to_float(credito_val),
                     "Centro de Custos": None,
+                    "Mov": mov_val,
                 })
 
     return parsed
@@ -856,16 +873,21 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_razao_hist(texts: list[str]) -> str:
-    """Return the historico text from whichever column contains it.
-
-    TOTVS exports place the historico in different columns depending on the
-    export version: col 19, col 20 or col 21.  We check all three and return
-    the first non-empty value found.
-    """
+    """Return the normalised historico text (used only for detection checks)."""
     for ci in (19, 20, 21):
         v = _safe_col(texts, ci).strip()
         if v:
             return v
+    return ""
+
+
+def _extract_razao_hist_raw(row: list) -> str:
+    """Return the historico text preserving original spacing (double spaces, leading space)."""
+    for ci in (19, 20, 21):
+        if ci < len(row) and row[ci] is not None:
+            v = str(row[ci])
+            if v.strip():
+                return v
     return ""
 
 
@@ -937,7 +959,8 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
         col8  = _safe_col(texts, 8)
         col10 = _safe_col(texts, 10)
         col13 = _safe_col(texts, 13)
-        col_hist = _extract_razao_hist(texts)  # Bug 1: checks cols 19, 20, 21
+        col_hist     = _extract_razao_hist(texts)       # normalised — for detection checks
+        col_hist_raw = _extract_razao_hist_raw(row)     # raw — stored value preserves spaces
 
         # ── (1) Account header row (always checked first) ──────────────────
         if col1 in {"Conta Analitica:", "Conta Analítica:"}:
@@ -992,11 +1015,10 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
         credit = parse_money_value(col13)
 
         # ── (4b) Standalone historico row (text only, no date, no amounts) ─
-        # Bug 1: TOTVS places the historico text in col 19, 20 or 21 on a
-        # dedicated row BEFORE the transaction row (sometimes with an empty
-        # row between them).  We capture it here as pending_historico.
+        # TOTVS places the historico text in col 19, 20 or 21 on a dedicated row
+        # BEFORE the transaction row.  Store the raw value to preserve spacing.
         if col_hist and debit is None and credit is None and not parse_date_value(col1):
-            pending_historico = col_hist
+            pending_historico = col_hist_raw
             continue
 
         # ── (5) Transaction row ────────────────────────────────────────────
@@ -1005,19 +1027,19 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             current_date = row_date
 
         if debit is not None or credit is not None:
-            historico = col_hist or pending_historico
+            historico = col_hist_raw or pending_historico
             pending_historico = ""
-            # Bug 2: calculate running saldo instead of reading from XLS column
             d = debit  if debit  is not None else Decimal(0)
             c = credit if credit is not None else Decimal(0)
-            running_saldo = (running_saldo if running_saldo is not None else Decimal(0)) + d - c
+            saldo_base = running_saldo if running_saldo is not None else Decimal(0)
+            running_saldo = _calcular_saldo(saldo_base, d, c, current_account_code)
             pending_record = {
                 "REG": 1700,
                 "NOME CONTA": current_account_name or "Sem conta",
                 "CONTA CONTÁBIL": current_account_code or "",
                 "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
                 "DATA": current_date,
-                "HISTÓRICO": historico or "Sem historico",
+                "HISTÓRICO": historico if historico.strip() else "Sem historico",
                 "DÉBITO": decimal_to_float(debit),
                 "CRÉDITO": decimal_to_float(credit),
                 "Saldo": decimal_to_float(running_saldo),
@@ -1222,7 +1244,7 @@ def adjust_column_widths(sheet, parsed_sheet: dict) -> None:
     if headers == BALANCETE_HCN_HEADERS:
         widths = {1: 8, 2: 22, 3: 54, 4: 18, 5: 18, 6: 18, 7: 18, 8: 10, 9: 12, 10: 22, 11: 16, 12: 22, 13: 16}
     elif headers == DIARIO_HCN_HEADERS:
-        widths = {1: 9, 2: 11, 3: 22, 4: 57, 5: 96, 6: 25, 7: 18, 8: 22}
+        widths = {1: 9, 2: 11, 3: 22, 4: 57, 5: 96, 6: 18, 7: 18, 8: 22, 9: 15}
     elif headers == RAZAO_HCN_HEADERS:
         # REG NOME_CONTA CONTA SALDO_ANT DATA HISTÓRICO DÉBITO CRÉDITO Saldo ContraP CentroCusto
         widths = {1: 8, 2: 44, 3: 22, 4: 18, 5: 16, 6: 56, 7: 18, 8: 18, 9: 18, 10: 22, 11: 18}
@@ -1262,6 +1284,18 @@ def build_sheet_title(headers: list, index: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper / utility functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal, conta: str) -> Decimal:
+    """Acumula saldo respeitando a natureza contábil da conta.
+
+    Passivo (grupo 2) e Receitas (3.2.1.01.x): crédito aumenta → ant - D + C.
+    Ativo (grupo 1) e Despesas: débito aumenta → ant + D - C.
+    """
+    grupo = conta.strip().split('.')[0] if conta.strip() else ''
+    if grupo == '2' or conta.strip().startswith('3.2.1.01'):
+        return saldo_ant - d + c
+    return saldo_ant + d - c
+
 
 def parse_pt_date_header(text: str) -> str | None:
     """Parse 'DD de Mês de AAAA' (from TOTVS date headers) → 'DD/MM'."""
