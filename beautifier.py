@@ -1297,38 +1297,48 @@ def build_sheet_title(headers: list, index: int) -> str:
 def _completar_historico(rows: list[list], start_idx: int, hist: str) -> str:
     """Tenta completar um histórico truncado (termina com espaço) olhando adiante.
 
-    Estratégia:
-      1. Busca linha de Contrapartida (col3) nas próximas 12 linhas e usa col19 se
-         for mais longa.
-      2. Se ainda não resolvido, busca linha isolada com col19 mas sem col1/col3/col8
-         (padrão da 2ª parte no bloco seguinte) e concatena.
-    """
-    best = hist.rstrip()
+    Passagem 1 — varre TODAS as linhas de Contrapartida nas próximas 12 e guarda a
+    col19 mais longa.  Usar a mais longa (não a primeira) resolve casos com 2 CPs.
 
+    Passagem 2 — só executada quando nenhuma CP melhorou o resultado: busca linha
+    isolada com col19 (sem col1/col3/col8) e concatena, preservando os espaços
+    finais do hist original como conector (evita colapsar "CTR  002" → "CTR 002").
+    """
+    hist_base = hist.rstrip()          # texto sem espaços finais
+    connector = hist[len(hist_base):]  # os espaços finais originais (ex: "  " para "CTR  ")
+
+    # ── Passagem 1: melhor Contrapartida ─────────────────────────────────────
+    best_cp = hist_base
     for offset in range(1, 13):
         idx = start_idx + offset
         if idx >= len(rows):
             break
         ahead_texts = [normalize_spaces(v) for v in rows[idx]]
-        ahead_col3 = _safe_col(ahead_texts, 3)
-
-        if ahead_col3 in {"Contrapartida:", "Contrapartida"}:
+        if _safe_col(ahead_texts, 3) in {"Contrapartida:", "Contrapartida"}:
             cp = _extract_razao_hist_raw(rows[idx]).strip()
-            if cp and len(cp) > len(best):
-                best = cp
-            break
+            if cp and len(cp) > len(best_cp):
+                best_cp = cp
 
-        # Linha isolada: tem col19 mas não tem col1, col3 nem col8
+    if len(best_cp) > len(hist_base):
+        return best_cp  # CP tem o texto mais completo (espaços internos preservados)
+
+    # ── Passagem 2: 2ª parte em linha isolada ────────────────────────────────
+    for offset in range(1, 13):
+        idx = start_idx + offset
+        if idx >= len(rows):
+            break
+        ahead_texts = [normalize_spaces(v) for v in rows[idx]]
         ahead_col1 = _safe_col(ahead_texts, 1)
+        ahead_col3 = _safe_col(ahead_texts, 3)
         ahead_col8 = _safe_col(ahead_texts, 8)
         parte2_raw = _extract_razao_hist_raw(rows[idx])
-        if parte2_raw.strip() and not ahead_col1.strip() and not ahead_col3.strip() and not ahead_col8.strip():
+        if (parte2_raw.strip() and not ahead_col1.strip()
+                and not ahead_col3.strip() and not ahead_col8.strip()):
             parte2 = parte2_raw.strip()
             if parte2 and normalize_text(parte2) != 'historico padrao':
-                best = best + ' ' + parte2
-                break
+                return hist_base + connector + parte2
 
-    return best if best else hist.rstrip()
+    return hist_base if hist_base else hist.strip()
 
 
 def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal,
