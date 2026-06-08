@@ -1009,6 +1009,16 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
             # as the label (col5); capture it here before continuing.
             if col5 and pending_record is not None and not pending_record["Contra Partida"]:
                 pending_record["Contra Partida"] = parse_razao_contra_code(col5)
+            # Retroactively improve the historico of the current record when the
+            # Contrapartida row carries a longer col19 text.  This fixes B1 blocks
+            # where the transaction row received a truncated historico (no trailing
+            # space, so _completar_historico was never called) but the CP row has
+            # the complete version.  Also fixes CTR double-space cases.
+            if pending_record is not None and col_hist_raw.strip():
+                current_hist = pending_record.get("HISTÓRICO") or ""
+                if current_hist in ("Sem historico", "") or \
+                        len(col_hist_raw.strip()) > len(current_hist.strip()):
+                    pending_record["HISTÓRICO"] = col_hist_raw.strip()
             # A real Contrapartida row always has monetary values in col6/col10.
             # Rows with only text (no amounts) are page-break continuation
             # fragments of the previous historico and must NOT trigger the flag.
@@ -1295,50 +1305,36 @@ def build_sheet_title(headers: list, index: int) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _completar_historico(rows: list[list], start_idx: int, hist: str) -> str:
-    """Tenta completar um histórico truncado (termina com espaço) olhando adiante.
+    """Tenta completar um histórico truncado (termina com espaço) via Contrapartidas.
 
-    Passagem 1 — varre TODAS as linhas de Contrapartida nas próximas 12 e guarda a
-    col19 mais longa.  Usar a mais longa (não a primeira) resolve casos com 2 CPs.
-
-    Passagem 2 — só executada quando nenhuma CP melhorou o resultado: busca linha
-    isolada com col19 (sem col1/col3/col8) e concatena, preservando os espaços
-    finais do hist original como conector (evita colapsar "CTR  002" → "CTR 002").
+    Varre TODAS as linhas de Contrapartida dentro do mesmo bloco (para ao encontrar
+    nova DATA ou novo cabeçalho de conta) e retorna a col19 mais longa encontrada.
+    Nunca cruza a fronteira do bloco para evitar capturar histórico do lançamento
+    seguinte.
     """
-    hist_base = hist.rstrip()          # texto sem espaços finais
-    connector = hist[len(hist_base):]  # os espaços finais originais (ex: "  " para "CTR  ")
+    hist_base = hist.rstrip()
+    best = hist_base
 
-    # ── Passagem 1: melhor Contrapartida ─────────────────────────────────────
-    best_cp = hist_base
-    for offset in range(1, 13):
-        idx = start_idx + offset
-        if idx >= len(rows):
-            break
-        ahead_texts = [normalize_spaces(v) for v in rows[idx]]
-        if _safe_col(ahead_texts, 3) in {"Contrapartida:", "Contrapartida"}:
-            cp = _extract_razao_hist_raw(rows[idx]).strip()
-            if cp and len(cp) > len(best_cp):
-                best_cp = cp
-
-    if len(best_cp) > len(hist_base):
-        return best_cp  # CP tem o texto mais completo (espaços internos preservados)
-
-    # ── Passagem 2: 2ª parte em linha isolada ────────────────────────────────
     for offset in range(1, 13):
         idx = start_idx + offset
         if idx >= len(rows):
             break
         ahead_texts = [normalize_spaces(v) for v in rows[idx]]
         ahead_col1 = _safe_col(ahead_texts, 1)
-        ahead_col3 = _safe_col(ahead_texts, 3)
-        ahead_col8 = _safe_col(ahead_texts, 8)
-        parte2_raw = _extract_razao_hist_raw(rows[idx])
-        if (parte2_raw.strip() and not ahead_col1.strip()
-                and not ahead_col3.strip() and not ahead_col8.strip()):
-            parte2 = parte2_raw.strip()
-            if parte2 and normalize_text(parte2) != 'historico padrao':
-                return hist_base + connector + parte2
 
-    return hist_base if hist_base else hist.strip()
+        # Parar ao cruzar fronteira do bloco
+        if parse_date_value(ahead_col1) is not None:
+            break
+        if ahead_col1 in {"Conta Analitica:", "Conta Analítica:"}:
+            break
+
+        if _safe_col(ahead_texts, 3) in {"Contrapartida:", "Contrapartida"}:
+            cp = _extract_razao_hist_raw(rows[idx]).strip()
+            if cp and len(cp) > len(best):
+                best = cp
+            # Continuar — pode haver mais CPs no bloco (ex: 2 CPs para o mesmo lançamento)
+
+    return best if best else hist_base
 
 
 def _calcular_saldo(saldo_ant: Decimal, d: Decimal, c: Decimal,
