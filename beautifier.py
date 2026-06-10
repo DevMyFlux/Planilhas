@@ -697,6 +697,8 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
         conta_norm = normalize_text(conta)
         if conta_norm == "conta":  # header-repetition row
             continue
+        if conta_norm.startswith("conta aux"):  # supplier/detail sub-rows
+            continue
         if conta_norm.startswith("total") or conta_norm.startswith("subtotal"):
             continue
 
@@ -707,24 +709,42 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
         if normalize_text(descricao) == "descricao":  # header-repetition row
             continue
 
-        # SaldoAnterior: TOTVS places the column label in one cell and the
-        # actual numeric value one cell to the right.  Try the label column
-        # first; if empty, fall back to label+1.
-        sa_col = columns["saldo_anterior"]
-        sa   = parse_money_value(get_value(row, sa_col))
-        if sa is None:
-            sa = parse_money_value(get_value(row, sa_col + 1))
+        # SaldoAnterior: some TOTVS exports place the column label in one cell
+        # and the actual value one cell to the right (offset pattern).  Scan
+        # from the detected column up to (but not including) the Débito column
+        # to catch both the direct and the offset layout.
+        sa_col  = columns["saldo_anterior"]
+        deb_col = columns["debito"]
+        scan_end = deb_col if deb_col > sa_col else sa_col + 3
+        sa = None
+        for _c in range(sa_col, scan_end):
+            sa = parse_money_value(get_value(row, _c))
+            if sa is not None:
+                break
         deb  = parse_money_value(get_value(row, columns["debito"]))
         cred = parse_money_value(get_value(row, columns["credito"]))
         sat  = parse_money_value(get_value(row, columns["saldo_atual"]))
 
-        # Flag columns: read from source if the column was detected by
-        # detect_balancete_layout; otherwise default to "N".
+        # Flag columns: read from source when detected; otherwise apply
+        # rule-based defaults derived from the IMED chart of accounts:
+        #   Estoque          = 'S' for group 1.1.5.x (hospital inventory)
+        #   ContaFinanceira  = 'S' for 1.1.1.02.02.x and 1.1.1.02.04.x
+        #                          (bank accounts and financial investments)
+        #   ReservaDeContingência = 'S' for two specific accounts
+        _RESERVA_ACCOUNTS = {"1.1.1.02.02.012", "1.1.1.02.04.010"}
+
         def _flag(col_key: str) -> str:
             col = columns.get(col_key)
             if col is not None:
                 v = normalize_text(get_value(row, col))
                 return "S" if v == "s" else "N"
+            # Rule-based fallback when the source file has no flag columns.
+            if col_key == "estoque":
+                return "S" if conta.startswith("1.1.5") else "N"
+            if col_key == "conta_financ":
+                return "S" if (conta.startswith("1.1.1.02.02") or conta.startswith("1.1.1.02.04")) else "N"
+            if col_key == "reserva":
+                return "S" if conta in _RESERVA_ACCOUNTS else "N"
             return "N"
 
         parsed.append({
