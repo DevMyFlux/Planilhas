@@ -619,6 +619,12 @@ def detect_balancete_layout(rows: list[list]) -> dict | None:
         if all(columns[k] is not None for k in required):
             columns["header_index"] = index
             columns["red"] = None  # optional – not required
+            # Optional flag columns present in some TOTVS Balancete exports
+            columns["estoque"]      = find_header_index(norm_row, {"estoque", "stk"})
+            columns["ativo_imob"]   = find_header_index(norm_row, {"ativo imob", "imobilizado"})
+            columns["deprec_acum"]  = find_header_index(norm_row, {"deprec acum", "depreciacao acumulativa", "depreciacao acum"})
+            columns["conta_financ"] = find_header_index(norm_row, {"conta financeira"})
+            columns["reserva"]      = find_header_index(norm_row, {"reserva de contingencia", "reserva contingencia"})
             return columns
     return None
 
@@ -684,23 +690,42 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
 
     for row in rows[columns["header_index"] + 1:]:
         conta = normalize_spaces(get_value(row, columns["conta"]))
+        # Skip rows without an account code: Conta Aux. detail rows, footer
+        # totals, and blank separator rows are all identified by an empty conta.
+        if not conta:
+            continue
         conta_norm = normalize_text(conta)
-        if conta_norm.startswith("conta aux") or conta_norm.startswith("total") or conta_norm.startswith("subtotal"):
+        if conta_norm == "conta":  # header-repetition row
+            continue
+        if conta_norm.startswith("total") or conta_norm.startswith("subtotal"):
             continue
 
-        descricao = normalize_spaces(get_value(row, columns["descricao"]))
+        # Preserve raw description text (double spaces, etc.) as exported by TOTVS;
+        # only strip leading/trailing whitespace and normalise newlines.
+        _desc_raw = get_value(row, columns["descricao"])
+        descricao = ("" if _desc_raw is None else str(_desc_raw)).replace("\n", " ").replace("\r", " ").strip()
+        if normalize_text(descricao) == "descricao":  # header-repetition row
+            continue
 
-        # Use column-specific positions detected by detect_balancete_layout so that
-        # intermediate parent-account rows with unusual cell counts are not missed.
-        sa   = parse_money_value(get_value(row, columns["saldo_anterior"]))
+        # SaldoAnterior: TOTVS places the column label in one cell and the
+        # actual numeric value one cell to the right.  Try the label column
+        # first; if empty, fall back to label+1.
+        sa_col = columns["saldo_anterior"]
+        sa   = parse_money_value(get_value(row, sa_col))
+        if sa is None:
+            sa = parse_money_value(get_value(row, sa_col + 1))
         deb  = parse_money_value(get_value(row, columns["debito"]))
         cred = parse_money_value(get_value(row, columns["credito"]))
         sat  = parse_money_value(get_value(row, columns["saldo_atual"]))
 
-        if normalize_text(conta) == "conta" or normalize_text(descricao) == "descricao":
-            continue
-        if not conta and not descricao and sa is None and deb is None and cred is None and sat is None:
-            continue
+        # Flag columns: read from source if the column was detected by
+        # detect_balancete_layout; otherwise default to "N".
+        def _flag(col_key: str) -> str:
+            col = columns.get(col_key)
+            if col is not None:
+                v = normalize_text(get_value(row, col))
+                return "S" if v == "s" else "N"
+            return "N"
 
         parsed.append({
             "REG": "0300",
@@ -710,9 +735,12 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
             "Debito": deb,
             "Credito": cred,
             "SaldoAtual": sat,
-            "Estoque": "N", "AtivoImob": "N",
-            "DepreciacaoAcumulativa": "N", "ContaFinanceira": "N",
-            "ReservaDeContingência": "N", "Centro de Custos": None,
+            "Estoque": _flag("estoque"),
+            "AtivoImob": _flag("ativo_imob"),
+            "DepreciacaoAcumulativa": _flag("deprec_acum"),
+            "ContaFinanceira": _flag("conta_financ"),
+            "ReservaDeContingência": _flag("reserva"),
+            "Centro de Custos": None,
         })
 
     return parsed
@@ -817,55 +845,95 @@ def parse_diario_rows(rows: list[list], columns: dict) -> list[dict]:
             if not conta_debito and not conta_credito:
                 continue
 
-            if conta_debito:
-                code, name = split_account_field(conta_debito)
-                # Account name may live in the adjacent column (TOTVS format)
-                if not name and col_debito_desc is not None:
-                    adj = _safe_col(texts, col_debito_desc)
-                    if adj and parse_money_value(adj) is None:
-                        name = adj
-                # Carry forward the debit account name if still missing
-                if not name:
-                    name = last_debito_name
-                elif name:
-                    last_debito_name = name
-                parsed.append({
-                    "REG": 1600,
-                    "DATA": current_date,
-                    "CLASSIFICAÇÃO": code,
-                    "DESCRIÇÃO": name,
-                    "HISTÓRICO": historico,
-                    "DÉBITO": decimal_to_float(debito_val),
-                    "CRÉDITO": 0.0,
-                    "Centro de Custos": None,
-                    "Mov": mov_val,
-                })
+            # Normalize double spaces in Diário text fields (fix for 42-line
+            # divergence; Razão intentionally preserves them via _extract_razao_hist_raw).
+            historico_out = ' '.join(historico.split())
+
+            # Build both sides of the movement, then apply HCN ordering:
+            # group 1.x/2.x (ativo/passivo) always precedes group 3.x
+            # (despesa/receita) within the same Mov pair.
+            pending: list[dict] = []
 
             if conta_credito:
                 code, name = split_account_field(conta_credito)
-                # Account name may live in the adjacent column (TOTVS format)
                 if not name and col_credito_desc is not None:
                     adj = _safe_col(texts, col_credito_desc)
                     if adj and parse_money_value(adj) is None:
                         name = adj
-                # Carry forward the credit account name if still missing
                 if not name:
                     name = last_credito_name
                 elif name:
                     last_credito_name = name
-                parsed.append({
+                pending.append({
                     "REG": 1600,
                     "DATA": current_date,
                     "CLASSIFICAÇÃO": code,
-                    "DESCRIÇÃO": name,
-                    "HISTÓRICO": historico,
+                    "DESCRIÇÃO": ' '.join(name.split()),
+                    "HISTÓRICO": historico_out,
                     "DÉBITO": None,
                     "CRÉDITO": decimal_to_float(credito_val),
                     "Centro de Custos": None,
                     "Mov": mov_val,
                 })
 
-    return parsed
+            if conta_debito:
+                code, name = split_account_field(conta_debito)
+                if not name and col_debito_desc is not None:
+                    adj = _safe_col(texts, col_debito_desc)
+                    if adj and parse_money_value(adj) is None:
+                        name = adj
+                if not name:
+                    name = last_debito_name
+                elif name:
+                    last_debito_name = name
+                pending.append({
+                    "REG": 1600,
+                    "DATA": current_date,
+                    "CLASSIFICAÇÃO": code,
+                    "DESCRIÇÃO": ' '.join(name.split()),
+                    "HISTÓRICO": historico_out,
+                    "DÉBITO": decimal_to_float(debito_val),
+                    "CRÉDITO": 0.0,
+                    "Centro de Custos": None,
+                    "Mov": mov_val,
+                })
+
+            if len(pending) == 2:
+                # Both sides present: group 1/2 before group 3.
+                # pending[0] = crédito row, pending[1] = débito row (built above).
+                grp_cre = str(pending[0]["CLASSIFICAÇÃO"]).split('.')[0]
+                grp_deb = str(pending[1]["CLASSIFICAÇÃO"]).split('.')[0]
+                if grp_deb in ('1', '2') and grp_cre == '3':
+                    # Exception: débito is 1/2, crédito is 3 → débito goes first
+                    parsed.append(pending[1])
+                    parsed.append(pending[0])
+                else:
+                    # Default: crédito first (covers 1/2-cre + 3-deb and same-group pairs)
+                    parsed.append(pending[0])
+                    parsed.append(pending[1])
+            else:
+                parsed.extend(pending)
+
+    # Post-process: fix ordering for split movements (each side on its own
+    # source row).  The combined-row branch above already handles combined
+    # rows; here we catch consecutive same-Mov pairs where group 3 ended up
+    # before group 1/2 because TOTVS writes the débito row first.
+    result: list[dict] = []
+    i = 0
+    while i < len(parsed):
+        if (
+            i + 1 < len(parsed)
+            and parsed[i]["Mov"] == parsed[i + 1]["Mov"]
+            and str(parsed[i]["CLASSIFICAÇÃO"]).split(".")[0] == "3"
+            and str(parsed[i + 1]["CLASSIFICAÇÃO"]).split(".")[0] in ("1", "2")
+        ):
+            result.append(parsed[i + 1])  # group 1/2 (ativo/passivo) first
+            result.append(parsed[i])      # group 3  (despesa/receita) second
+            i += 2
+        else:
+            result.append(parsed[i])
+            i += 1
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
