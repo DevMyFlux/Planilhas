@@ -711,40 +711,47 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
 
         # SaldoAnterior: some TOTVS exports place the column label in one cell
         # and the actual value one cell to the right (offset pattern).  Scan
-        # from the detected column up to (but not including) the Débito column
-        # to catch both the direct and the offset layout.
+        # from the detected column up to (but not including) the Débito column.
+        # Prefer the first non-zero value; fall back to the first zero if no
+        # non-zero is found.  This prevents stopping at a "0,00" filler column
+        # that some TOTVS layouts emit before the real Saldo Anterior data cell.
         sa_col  = columns["saldo_anterior"]
         deb_col = columns["debito"]
         scan_end = deb_col if deb_col > sa_col else sa_col + 3
         sa = None
+        _sa_zero_fallback: Decimal | None = None
         for _c in range(sa_col, scan_end):
-            sa = parse_money_value(get_value(row, _c))
-            if sa is not None:
+            _v = parse_money_value(get_value(row, _c))
+            if _v is None:
+                continue
+            if _v != Decimal("0"):
+                sa = _v
                 break
+            _sa_zero_fallback = _v
+        if sa is None:
+            sa = _sa_zero_fallback
         deb  = parse_money_value(get_value(row, columns["debito"]))
         cred = parse_money_value(get_value(row, columns["credito"]))
         sat  = parse_money_value(get_value(row, columns["saldo_atual"]))
 
-        # Flag columns: read from source when detected; otherwise apply
-        # rule-based defaults derived from the IMED chart of accounts:
-        #   Estoque          = 'S' for group 1.1.5.x (hospital inventory)
-        #   ContaFinanceira  = 'S' for 1.1.1.02.02.x and 1.1.1.02.04.x
-        #                          (bank accounts and financial investments)
-        #   ReservaDeContingência = 'S' for two specific accounts
-        _RESERVA_ACCOUNTS = {"1.1.1.02.02.012", "1.1.1.02.04.010"}
-
+        # Flag columns: read from source when the column is present in the
+        # export.  ContaFinanceira has one universal rule: it applies only to
+        # leaf sub-accounts (prefix ends with a dot before the last segment),
+        # never to aggregator/parent groups.  Estoque and ReservaDeContingência
+        # vary per hospital unit and must come from the source — no hardcoded
+        # prefix rules are used for those two flags.
         def _flag(col_key: str) -> str:
             col = columns.get(col_key)
             if col is not None:
                 v = normalize_text(get_value(row, col))
                 return "S" if v == "s" else "N"
-            # Rule-based fallback when the source file has no flag columns.
-            if col_key == "estoque":
-                return "S" if conta.startswith("1.1.5") else "N"
+            # ContaFinanceira rule: S only for leaf accounts under the two
+            # financial sub-groups (trailing dot ensures parent groups are
+            # excluded: "1.1.1.02.02" does not start with "1.1.1.02.02.").
             if col_key == "conta_financ":
-                return "S" if (conta.startswith("1.1.1.02.02") or conta.startswith("1.1.1.02.04")) else "N"
-            if col_key == "reserva":
-                return "S" if conta in _RESERVA_ACCOUNTS else "N"
+                return "S" if (
+                    conta.startswith("1.1.1.02.02.") or conta.startswith("1.1.1.02.04.")
+                ) else "N"
             return "N"
 
         parsed.append({
