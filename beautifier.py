@@ -709,25 +709,29 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
         if normalize_text(descricao) == "descricao":  # header-repetition row
             continue
 
-        # SaldoAnterior: some TOTVS exports place the column label in one cell
-        # and the actual value one cell to the right (offset pattern).  Scan
-        # from the detected column up to (but not including) the Débito column.
-        # Prefer the first non-zero value; fall back to the first zero if no
-        # non-zero is found.  This prevents stopping at a "0,00" filler column
-        # that some TOTVS layouts emit before the real Saldo Anterior data cell.
-        sa_col  = columns["saldo_anterior"]
-        deb_col = columns["debito"]
-        scan_end = deb_col if deb_col > sa_col else sa_col + 3
+        # SaldoAnterior: scan BACKWARDS from just before Débito to just after
+        # the description column.  This is robust regardless of where
+        # detect_balancete_layout placed the "Saldo Anterior" label: the real
+        # data column is always the rightmost money cell before Débito.
+        # Forward scans fail when a zero-filled filler column sits between the
+        # detected label column and the real data column — the first non-None
+        # value is 0 and the scan stops too early.
+        # Strategy: prefer the first non-zero found while scanning right-to-left;
+        # keep the rightmost zero as fallback for accounts whose balance is
+        # genuinely zero.
+        desc_col = columns["descricao"]
+        deb_col  = columns["debito"]
         sa = None
         _sa_zero_fallback: Decimal | None = None
-        for _c in range(sa_col, scan_end):
+        for _c in range(deb_col - 1, desc_col, -1):
             _v = parse_money_value(get_value(row, _c))
             if _v is None:
                 continue
             if _v != Decimal("0"):
                 sa = _v
                 break
-            _sa_zero_fallback = _v
+            if _sa_zero_fallback is None:
+                _sa_zero_fallback = _v  # rightmost zero = the actual SA column
         if sa is None:
             sa = _sa_zero_fallback
         deb  = parse_money_value(get_value(row, columns["debito"]))
@@ -752,6 +756,15 @@ def parse_balancete_rows(rows: list[list], columns: dict) -> list[dict]:
                 return "S" if (
                     conta.startswith("1.1.1.02.02.") or conta.startswith("1.1.1.02.04.")
                 ) else "N"
+            # ReservaDeContingência: when no source column exists, detect by
+            # account name keywords.  Reserve/contingency accounts within the
+            # financial sub-groups consistently contain "fundo", "reserva", or
+            # "contingencia" per IMED naming convention (unit-independent).
+            if col_key == "reserva":
+                if conta.startswith("1.1.1.02.02.") or conta.startswith("1.1.1.02.04."):
+                    nome_lower = normalize_text(descricao)
+                    return "S" if any(kw in nome_lower for kw in ("fundo", "reserva", "contingencia")) else "N"
+                return "N"
             return "N"
 
         parsed.append({
