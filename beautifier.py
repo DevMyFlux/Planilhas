@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
+import os
 import re
 import unicodedata
 
@@ -475,6 +476,18 @@ def extract_records(rows: list[tuple]) -> dict | None:
                 "description_column": 5,
             }
 
+    soulmv_razao = detect_soulmv_razao_layout(non_empty_rows)
+    if soulmv_razao is not None:
+        soulmv_rows = parse_soulmv_razao_rows(non_empty_rows, soulmv_razao)
+        if soulmv_rows:
+            return {
+                "headers": RAZAO_HCN_HEADERS,
+                "rows": soulmv_rows,
+                "date_columns": set(),
+                "money_columns": {4, 7, 8, 9},
+                "description_column": 6,
+            }
+
     razao = detect_razao_layout(non_empty_rows)
     if razao is not None:
         razao_rows = parse_razao_rows(non_empty_rows, razao)
@@ -553,12 +566,26 @@ def read_input_sheets(file_path: str, input_extension: str) -> list[tuple[str, l
 
     workbook = load_workbook(file_path, data_only=True, read_only=True)
     try:
+        file_size = os.path.getsize(file_path)
         return [
-            (sheet.title, list(sheet.iter_rows(values_only=True)))
+            (sheet.title, _read_worksheet_rows(sheet, file_size))
             for sheet in workbook.worksheets
         ]
     finally:
         workbook.close()
+
+
+def _read_worksheet_rows(sheet, file_size: int) -> list[tuple]:
+    # Some source systems (e.g. SOULMV) write a stale <dimension ref="A1"/> tag
+    # even when the sheet holds thousands of real rows. openpyxl's read_only
+    # mode trusts that tag at face value, so max_row/max_column report 1 and
+    # iter_rows() silently yields nothing. A reported dimension that tiny on a
+    # file far too large to actually be empty is the tell; force a real
+    # recalculation before reading in that case.
+    if sheet.max_row <= 1 and sheet.max_column <= 1 and file_size > 20_000:
+        sheet.reset_dimensions()
+        sheet.calculate_dimension(force=True)
+    return list(sheet.iter_rows(values_only=True))
 
 
 def read_pdf_sheets(file_stream: BytesIO) -> list[tuple[str, list[tuple]]]:
@@ -1174,6 +1201,200 @@ def parse_razao_rows(rows: list[list], layout: dict) -> list[dict]:
                 "Centro de Custos": None,
             }
             parsed.append(pending_record)
+
+    return parsed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SOULMV Razão parsing (e.g. hospital HCN — layout "R_RAZAO_RET_SC")
+# ═══════════════════════════════════════════════════════════════════════════════
+# This export is a printed report captured cell-by-cell: every account renders
+# as a repeating block of merged-cell rows, and a page break re-wraps the
+# layout so the debit/credit/saldo values do not sit in a fixed column from
+# block to block. Rows are classified by their textual markers ("Conta
+# Analítica:", "Contrapartida:", "<<== Saldo da Conta", the "Data" column
+# header) instead of by column letter, and money values inside a classified
+# row are read in left-to-right order (Débito, Crédito[, Saldo]).
+
+_SOULMV_MONEY_CORE_RE = re.compile(r"^\d{1,3}(?:\.\d{3})*,\d{2}$")
+_SOULMV_CNPJ_RE = re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}")
+_SOULMV_CONTA_LABELS = {"Conta Analítica:", "Conta Analitica:"}
+_SOULMV_SALDO_ANT_LABELS = {"Saldo Anterior:", "Saldo Anterior"}
+_SOULMV_CONTRAPARTIDA_LABELS = {"Contrapartida:", "Contrapartida"}
+_SOULMV_HEADER_VALUE_LABELS = {"Valor Débito", "Valor Crédito", "Saldo", "Histórico Padrão"}
+
+
+def detect_soulmv_razao_layout(rows: list[list]) -> dict | None:
+    """Detect the SOULMV 'Razão Contábil' export (e.g. hospital HCN).
+
+    SOULMV prints its own name in the report header ("SOULMV - Sistema de
+    Contabilidade"). That text is a reliable, hospital-independent signature
+    that never appears in the TOTVS-based Razão exports (IMED Formosa /
+    Policlínica Posse) handled by detect_razao_layout/parse_razao_rows, whose
+    fixed column offsets would otherwise misparse this layout.
+    """
+    has_soulmv = False
+    account_header_index = None
+    for index in range(min(len(rows), 60)):
+        norm_row = [normalize_text(v) for v in rows[index]]
+        if not has_soulmv and any(v and "soulmv" in v for v in norm_row):
+            has_soulmv = True
+        if account_header_index is None and (
+            "conta analitica:" in norm_row or "conta analitica" in norm_row
+        ):
+            account_header_index = index
+        if has_soulmv and account_header_index is not None:
+            return {"account_header_index": account_header_index}
+    return None
+
+
+def _soulmv_parse_money(text: str) -> Decimal | None:
+    # SOULMV writes every value as pt-BR text with a 2-decimal comma
+    # ("2.000.000,00"), occasionally with a TRAILING minus for negative
+    # balances ("402.666,64-") instead of a leading one. A dedicated, strict
+    # parser is used here (instead of the shared parse_money_value, whose
+    # bare-integer fallback exists for native numeric cells elsewhere in the
+    # app) so stray digits in this text-only export — e.g. the "2" in a
+    # "Página: 2" boilerplate row — are never mistaken for a money value.
+    if not text:
+        return None
+    t = text.strip()
+    if not t:
+        return None
+    neg = t.startswith("-") or t.endswith("-")
+    core = t.strip("-")
+    if not _SOULMV_MONEY_CORE_RE.match(core):
+        return None
+    try:
+        value = Decimal(core.replace(".", "").replace(",", "."))
+    except InvalidOperation:
+        return None
+    return -value if neg else value
+
+
+def _soulmv_is_boilerplate_line(text: str) -> bool:
+    norm = normalize_text(text)
+    if norm.startswith("periodo:"):
+        return True
+    return bool(_SOULMV_CNPJ_RE.search(text))
+
+
+def parse_soulmv_razao_rows(rows: list[list], layout: dict) -> list[dict]:
+    parsed: list[dict] = []
+    current_account_code = ""
+    current_account_name = ""
+    current_saldo_anterior: Decimal | None = None
+    current_date = ""
+    pending_historico = ""
+    pending_record: dict | None = None
+
+    total_rows = len(rows)
+    row_index = 0
+    while row_index < total_rows:
+        row = rows[row_index]
+        texts = [normalize_spaces(v) for v in row]
+        non_empty = [t for t in texts if t]
+
+        if not non_empty:
+            row_index += 1
+            continue
+
+        # ── (1) Account header row ──────────────────────────────────────
+        if any(t in _SOULMV_CONTA_LABELS for t in texts):
+            candidates = [
+                t for t in non_empty
+                if t not in _SOULMV_CONTA_LABELS
+                and t not in _SOULMV_SALDO_ANT_LABELS
+                and _soulmv_parse_money(t) is None
+            ]
+            new_code, new_name = ("", "")
+            if len(candidates) == 1:
+                new_code, new_name = parse_razao_account_header(candidates[0])
+            if new_code and new_code != current_account_code:
+                current_saldo_anterior = _find_saldo_anterior(texts)
+                pending_record = None
+                pending_historico = ""
+            if new_code:
+                current_account_code = new_code
+                current_account_name = new_name
+            row_index += 1
+            continue
+
+        # ── (2) End-of-account checksum row ("<<== Saldo da Conta: ...") ─
+        if any("<<==" in t for t in texts):
+            row_index += 1
+            continue
+
+        # ── (3) Column header row (repeats on every printed page) ────────
+        if "Data" in texts and any(t in _SOULMV_HEADER_VALUE_LABELS for t in texts):
+            row_index += 1
+            continue
+
+        # ── (4) Contrapartida row ─────────────────────────────────────────
+        if any(t in _SOULMV_CONTRAPARTIDA_LABELS for t in texts):
+            values = [v for v in (_soulmv_parse_money(t) for t in texts) if v is not None]
+            # A real Contrapartida row always carries its own Débito/Crédito.
+            # Rows with the label but no amounts are page-break historico
+            # fragments and must not be treated as a Contrapartida block.
+            if len(values) >= 2 and pending_record is not None:
+                next_index = row_index + 1
+                while next_index < total_rows and all(
+                    normalize_spaces(v) == "" for v in rows[next_index]
+                ):
+                    next_index += 1
+                if next_index < total_rows:
+                    next_texts = [normalize_spaces(v) for v in rows[next_index]]
+                    next_non_empty = [t for t in next_texts if t]
+                    if len(next_non_empty) == 1 and CONTRA_RE.match(next_non_empty[0]):
+                        code = parse_razao_contra_code(next_non_empty[0])
+                        existing = pending_record.get("Contra Partida") or ""
+                        pending_record["Contra Partida"] = (
+                            f"{existing}; {code}" if existing else code
+                        )
+            row_index += 1
+            continue
+
+        # ── (5) Transaction / value row ───────────────────────────────────
+        values = [v for v in (_soulmv_parse_money(t) for t in texts) if v is not None]
+        if values:
+            for t in texts:
+                if DATE_RE.match(t):
+                    current_date = t
+                    break
+            debito = values[0] if len(values) > 0 else None
+            credito = values[1] if len(values) > 1 else None
+            saldo = values[2] if len(values) > 2 else None
+            historico = pending_historico or "Sem historico"
+            pending_historico = ""
+            pending_record = {
+                "REG": 1700,
+                "NOME CONTA": current_account_name or "Sem conta",
+                "CONTA CONTÁBIL": current_account_code or "",
+                "SALDO ANTERIOR": decimal_to_float(current_saldo_anterior),
+                "DATA": current_date,
+                "HISTÓRICO": historico,
+                "DÉBITO": decimal_to_float(debito),
+                "CRÉDITO": decimal_to_float(credito),
+                "Saldo": decimal_to_float(saldo),
+                "Contra Partida": "",
+                "Centro de Custos": None,
+            }
+            parsed.append(pending_record)
+            row_index += 1
+            continue
+
+        # ── (6) Standalone text row: historico, contra-account code (the
+        #     code row is consumed via the lookahead in step 4 above; when
+        #     the main loop reaches it independently, do nothing), or
+        #     report boilerplate (period line, hospital name + CNPJ) ────────
+        if len(non_empty) == 1:
+            text = non_empty[0]
+            if not _soulmv_is_boilerplate_line(text) and not CONTRA_RE.match(text):
+                pending_historico = text
+            row_index += 1
+            continue
+
+        row_index += 1
 
     return parsed
 
