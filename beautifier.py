@@ -97,7 +97,7 @@ def beautify_workbook(file_path: str, input_extension: str = ".xlsx") -> BytesIO
     order: list[tuple] = []  # insertion order to preserve sheet ordering
 
     for original_title, rows in read_input_sheets(file_path, input_extension):
-        parsed_sheet = extract_records(rows)
+        parsed_sheet = extract_records(rows, sheet_title=original_title)
         if not parsed_sheet:
             continue
 
@@ -447,7 +447,7 @@ def parse_razao_pdf(pdf) -> list[dict]:
 # XLS / XLSX extraction
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def extract_records(rows: list[tuple]) -> dict | None:
+def extract_records(rows: list[tuple], sheet_title: str = "") -> dict | None:
     non_empty_rows = [list(row) for row in rows if not row_is_empty(row)]
     if not non_empty_rows:
         return None
@@ -476,7 +476,7 @@ def extract_records(rows: list[tuple]) -> dict | None:
                 "description_column": 5,
             }
 
-    soulmv_razao = detect_soulmv_razao_layout(non_empty_rows)
+    soulmv_razao = detect_soulmv_razao_layout(non_empty_rows, sheet_title)
     if soulmv_razao is not None:
         soulmv_rows = parse_soulmv_razao_rows(non_empty_rows, soulmv_razao)
         if soulmv_rows:
@@ -1224,7 +1224,7 @@ _SOULMV_CONTRAPARTIDA_LABELS = {"Contrapartida:", "Contrapartida"}
 _SOULMV_HEADER_VALUE_LABELS = {"Valor Débito", "Valor Crédito", "Saldo", "Histórico Padrão"}
 
 
-def detect_soulmv_razao_layout(rows: list[list]) -> dict | None:
+def detect_soulmv_razao_layout(rows: list[list], sheet_title: str = "") -> dict | None:
     """Detect the SOULMV 'Razão Contábil' export (e.g. hospital HCN).
 
     SOULMV prints its own name in the report header ("SOULMV - Sistema de
@@ -1232,8 +1232,17 @@ def detect_soulmv_razao_layout(rows: list[list]) -> dict | None:
     that never appears in the TOTVS-based Razão exports (IMED Formosa /
     Policlínica Posse) handled by detect_razao_layout/parse_razao_rows, whose
     fixed column offsets would otherwise misparse this layout.
+
+    Some SOULMV exports are printed from a page range that excludes the
+    report's cover header (no "SOULMV" text anywhere in the file — e.g.
+    LIVRO_RAZAO_*_IMED_HET.xls), so that text can be entirely absent even
+    though the block-print layout is identical. SOULMV's internal worksheet
+    name ("R_RAZAO_RET_SC", possibly suffixed on continuation sheets) is a
+    second, independent signature from the accounting system itself rather
+    than the print range, and is used as a fallback when the header text is
+    missing.
     """
-    has_soulmv = False
+    has_soulmv = normalize_text(sheet_title).startswith("r_razao_ret_sc")
     account_header_index = None
     for index in range(min(len(rows), 60)):
         norm_row = [normalize_text(v) for v in rows[index]]
