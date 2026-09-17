@@ -1,4 +1,5 @@
 from io import BytesIO
+import gc
 import os
 import tempfile
 import traceback
@@ -32,55 +33,67 @@ def index():
 
 @app.post("/upload")
 def upload_file():
-    uploaded_file = request.files.get("file")
-
-    if uploaded_file is None or uploaded_file.filename == "":
-        flash("Selecione um arquivo PDF ou Excel para continuar.")
-        return redirect(url_for("index"))
-
-    if not is_allowed_file(uploaded_file.filename):
-        flash("Envie um arquivo .pdf, .xls, .xlsx ou .xlsm.")
-        return redirect(url_for("index"))
-
-    original_name = secure_filename(uploaded_file.filename)
-    original_extension = Path(original_name).suffix.lower()
-    output_name = f"{Path(original_name).stem}_organizado_{uuid4().hex[:8]}.xlsx"
-
-    # Write the upload to a named temp file so the file is never fully held
-    # in process memory — the OS page cache handles buffering instead.
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=original_extension)
     try:
-        with os.fdopen(tmp_fd, "wb") as tmp_file:
-            uploaded_file.save(tmp_file)
+        uploaded_file = request.files.get("file")
 
+        if uploaded_file is None or uploaded_file.filename == "":
+            flash("Selecione um arquivo PDF ou Excel para continuar.")
+            return redirect(url_for("index"))
+
+        if not is_allowed_file(uploaded_file.filename):
+            flash("Envie um arquivo .pdf, .xls, .xlsx ou .xlsm.")
+            return redirect(url_for("index"))
+
+        original_name = secure_filename(uploaded_file.filename)
+        original_extension = Path(original_name).suffix.lower()
+        output_name = f"{Path(original_name).stem}_organizado_{uuid4().hex[:8]}.xlsx"
+
+        # Write the upload to a named temp file so the file is never fully held
+        # in process memory — the OS page cache handles buffering instead.
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=original_extension)
         try:
-            output_stream = beautify_workbook(tmp_path, input_extension=original_extension)
-        except InvalidFileException:
-            flash("Nao foi possivel abrir esse arquivo. Confira se ele e um Excel valido.")
-            return redirect(url_for("index"))
-        except ValueError as exc:
-            flash(str(exc))
-            return redirect(url_for("index"))
-        except Exception:
-            traceback.print_exc()
-            flash("O arquivo foi lido, mas houve um erro inesperado ao organizar a planilha.")
-            return redirect(url_for("index"))
-    finally:
-        # Always remove the temp file, even if processing raised an exception.
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            with os.fdopen(tmp_fd, "wb") as tmp_file:
+                uploaded_file.save(tmp_file)
 
-    output_stream.seek(0)
+            try:
+                output_stream = beautify_workbook(tmp_path, input_extension=original_extension)
+            except InvalidFileException:
+                flash("Nao foi possivel abrir esse arquivo. Confira se ele e um Excel valido.")
+                return redirect(url_for("index"))
+            except ValueError as exc:
+                flash(str(exc))
+                return redirect(url_for("index"))
+            except Exception:
+                traceback.print_exc()
+                flash("O arquivo foi lido, mas houve um erro inesperado ao organizar a planilha.")
+                return redirect(url_for("index"))
+        finally:
+            # Always remove the temp file, even if processing raised an exception.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
-    return send_file(
-        output_stream,
-        as_attachment=True,
-        download_name=output_name,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        output_stream.seek(0)
+
+        response = send_file(
+            output_stream,
+            as_attachment=True,
+            download_name=output_name,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        
+        # Force garbage collection to clear any lingering objects from processing.
+        gc.collect()
+        
+        return response
+    except Exception:
+        traceback.print_exc()
+        flash("Erro inesperado ao processar arquivo.")
+        gc.collect()
+        return redirect(url_for("index"))
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+
