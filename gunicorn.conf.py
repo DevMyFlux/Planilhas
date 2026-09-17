@@ -7,9 +7,9 @@ import multiprocessing
 bind = "0.0.0.0:5000"
 
 # ── Workers ───────────────────────────────────────────────────────────────────
-# Spreadsheet processing is CPU-bound; use (2 × cores + 1) as a starting point
-# but cap at 4 to stay within the 1 GB memory budget.
-workers = min(multiprocessing.cpu_count() * 2 + 1, 4)
+# Spreadsheet processing is CPU-bound, but 1 GB memory limit allows only 1-2 workers.
+# Use 2 workers to handle concurrent requests without OOM.
+workers = 2
 worker_class = "sync"
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
@@ -25,9 +25,10 @@ loglevel = "info"
 
 # ── Memory safety ─────────────────────────────────────────────────────────────
 # Restart a worker after it has served this many requests to reclaim any
-# memory that leaked during spreadsheet processing.
-max_requests = 200
-max_requests_jitter = 40
+# memory that leaked during spreadsheet processing. Aggressive limit ensures
+# long-lived cache is cleared.
+max_requests = 100
+max_requests_jitter = 20
 
 # ── Request size limits ────────────────────────────────────────────────────────
 # By default Gunicorn enforces conservative limits that cause HTTP 413 errors
@@ -37,3 +38,4 @@ max_requests_jitter = 40
 limit_request_line = 0
 limit_request_fields = 0
 limit_request_field_size = 0
+
