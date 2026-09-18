@@ -166,7 +166,9 @@ def beautify_pdf(file_stream: BytesIO) -> BytesIO:
 def parse_pdf_documents(file_stream: BytesIO) -> list[tuple[str, dict]]:
     file_stream.seek(0)
     with pdfplumber.open(file_stream) as pdf:
-        first_page_text = pdf.pages[0].extract_text() or ""
+        first_page = pdf.pages[0]
+        first_page_text = first_page.extract_text() or ""
+        first_page.close()
         norm = normalize_text(first_page_text)
 
         if "balancete" in norm:
@@ -221,6 +223,18 @@ def _razao_sheet(rows: list[dict]) -> dict:
 
 # ── PDF page helpers ──────────────────────────────────────────────────────────
 
+def iter_pdf_pages(pdf):
+    # pdfplumber keeps every Page in pdf.pages and caches all of its chars/
+    # objects until the page is closed, so looping without releasing them
+    # holds the whole document's layout in memory (a 98-page Razao peaked at
+    # ~620 MB). Closing each page as soon as it is consumed keeps memory flat.
+    for page in pdf.pages:
+        try:
+            yield page
+        finally:
+            page.close()
+
+
 def parse_balancete_pdf(pdf) -> list[dict]:
     """Parse TOTVS Balancete PDF lines.
 
@@ -237,7 +251,7 @@ def parse_balancete_pdf(pdf) -> list[dict]:
         r"(?P<credito>" + _money + r")\s+"
         r"(?P<saldo_atual>" + _money + r")[DC]?$"
     )
-    for page in pdf.pages:
+    for page in iter_pdf_pages(pdf):
         text = page.extract_text() or ""
         for line in text.splitlines():
             m = pattern.match(normalize_spaces(line))
@@ -265,7 +279,7 @@ def parse_diario_pdf(pdf) -> list[dict]:
     rows: list[dict] = []
     current: dict | None = None
 
-    for page in pdf.pages:
+    for page in iter_pdf_pages(pdf):
         line_map = extract_pdf_lines(page)
         for _, words in line_map:
             if not words:
@@ -393,7 +407,7 @@ def parse_razao_pdf(pdf) -> list[dict]:
     pending_record: dict | None = None
     money_pattern = r"-?\d{1,3}(?:\.\d{3})*,\d{2}"
 
-    for page in pdf.pages:
+    for page in iter_pdf_pages(pdf):
         text = page.extract_text() or ""
         for raw_line in text.splitlines():
             line = normalize_spaces(raw_line)
@@ -592,7 +606,7 @@ def read_pdf_sheets(file_stream: BytesIO) -> list[tuple[str, list[tuple]]]:
     file_stream.seek(0)
     rows: list[tuple] = []
     with pdfplumber.open(file_stream) as pdf:
-        for page in pdf.pages:
+        for page in iter_pdf_pages(pdf):
             page_rows = extract_rows_from_pdf_page(page)
             if page_rows:
                 rows.extend(page_rows)

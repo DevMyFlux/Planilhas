@@ -27,8 +27,9 @@ worker_class = "sync"
 preload_app = True
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
-# Large spreadsheets can take a while to process; give each request 120 s.
-timeout = 120
+# A 735-page Razao PDF takes ~90 s to parse on a fast dev machine; give each
+# request 300 s so a slower container isn't killed by the master mid-request.
+timeout = 300
 graceful_timeout = 30
 keepalive = 5
 
