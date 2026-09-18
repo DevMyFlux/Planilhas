@@ -291,71 +291,164 @@ def parse_balancete_pdf(pdf) -> list[dict]:
     return rows
 
 
+_PT_MONTHS = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
+    "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
+}
+# "URUAÇU, 01 de Julho de 2026" - printed above the movements of each day.
+_DIARIO_DATE_LINE_RE = re.compile(r"^\D+?,\s*(\d{1,2})\s+de\s+(\S+)\s+de\s+\d{4}$", re.IGNORECASE)
+_DIARIO_MONEY_RE = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}-?$")
+
+# Column edges used when a page has no header row to read them from
+# (portrait layout of the Posse export).
+_DIARIO_DEFAULT_COLUMNS = {
+    "debit_x": 100.0, "credit_x": 205.0, "hist_x": 306.0,
+    "debit_right": 519.0, "split_x": 551.0,
+}
+
+
+def _diario_page_lines(page) -> list[tuple[float, list[tuple[float, float, str]]]]:
+    grouped: dict[float, list[tuple[float, float, str]]] = {}
+    for word in page.extract_words(use_text_flow=True):
+        key = round(word["top"], 1)
+        grouped.setdefault(key, []).append((round(word["x0"], 1), round(word["x1"], 1), word["text"]))
+    return sorted(grouped.items(), key=lambda item: item[0])
+
+
+def _diario_columns_from_header(words: list[tuple[float, float, str]]) -> dict | None:
+    """Read the column edges from the "Lote / Nr. Mvto / Cont. Débito / ..." row.
+
+    The two Diário layouts (portrait Posse, landscape HCN/HET) place the same
+    columns at very different x positions, and the wide Histórico column of the
+    landscape one runs past the fixed edges the old parser assumed - so every
+    edge is taken from the header of the page being parsed.
+    """
+    ordered = sorted(words)
+    texts = [t for _, _, t in ordered]
+    cont_x = [x0 for x0, _, t in ordered if t == "Cont."]
+    hist_x = next((x0 for x0, _, t in ordered if t.startswith("Hist")), None)
+    nr_x = next((x0 for x0, _, t in ordered if t == "Nr."), None)
+    valor_idx = [i for i, t in enumerate(texts) if t == "Valor"]
+    if not cont_x or hist_x is None or nr_x is None or len(valor_idx) < 2:
+        return None
+    if valor_idx[1] + 1 >= len(ordered):
+        return None
+    debit_right = ordered[valor_idx[0] + 1][1]
+    credit_right = ordered[valor_idx[1] + 1][1]
+    return {
+        "debit_x": nr_x + 15.0,
+        "credit_x": cont_x[-1] - 3.0,
+        "hist_x": hist_x - 3.0,
+        "debit_right": debit_right,
+        "split_x": (debit_right + credit_right) / 2.0,
+    }
+
+
 def parse_diario_pdf(pdf) -> list[dict]:
     rows: list[dict] = []
     current: dict | None = None
+    columns = dict(_DIARIO_DEFAULT_COLUMNS)
+    current_date = ""
 
     for page in iter_pdf_pages(pdf):
-        line_map = extract_pdf_lines(page)
-        for _, words in line_map:
+        lines = _diario_page_lines(page)
+
+        header_top = None
+        for top, words in lines:
+            if sorted(words)[0][2] == "Lote":
+                header_top = top
+                columns = _diario_columns_from_header(words) or columns
+                break
+
+        for top, words in lines:
             if not words:
                 continue
             ordered = sorted(words, key=lambda item: item[0])
-            texts = [t for _, t in ordered]
+            texts = [t for _, _, t in ordered]
             first_text = texts[0]
             line_text = " ".join(texts)
             norm_line = normalize_text(line_text)
 
-            if (
-                first_text == "Lote"
-                or "diario" in norm_line
-                or "pagina:" in norm_line
-                or "periodo:" in norm_line
-                or "uruacu" in norm_line
-                or "hcn - hosp" in norm_line
-                or "total do dia:" in norm_line
-                or "total da empresa:" in norm_line
-                or "total geral:" in norm_line
-                or re.fullmatch(r"(?:-?\d{1,3}(?:\.\d{3})*,\d{2}\s*){1,3}", line_text.strip())
-                or "19.324.171/0008-70" in line_text
-                or "centro-norte goiano" in norm_line
-            ):
-                continue
+            # "Lote" sits in the leftmost column; the next cell is the Nr. Mvto,
+            # alone or glued to the debit account code (see split_mvto_and_account).
+            is_movement_start = (
+                re.fullmatch(r"\d+", first_text) is not None
+                and ordered[0][0] < columns["debit_x"] - 20.0
+                and len(ordered) >= 2
+                and (
+                    re.match(r"^\d{8}", texts[1]) is not None
+                    or _DIARIO_MVTO_ACCOUNT_RE.match(texts[1]) is not None
+                )
+            )
 
-            if re.fullmatch(r"\d+", first_text) and len(ordered) >= 2 and re.match(r"^\d{8}", texts[1]):
+            if not is_movement_start:
+                date_match = _DIARIO_DATE_LINE_RE.match(line_text.strip())
+                month = _PT_MONTHS.get(normalize_text(date_match.group(2))) if date_match else None
+                if month:
+                    current_date = f"{int(date_match.group(1)):02d}/{month:02d}"
+                    continue
+                # Everything above the column header is the printed page header
+                # (hospital, "SOULMV - Sistema de Contabilidade", period...).
+                if top < (header_top - 0.5 if header_top is not None else 60.0):
+                    continue
+                if (
+                    first_text == "Lote"
+                    or "diario" in norm_line
+                    or "pagina:" in norm_line
+                    or "periodo:" in norm_line
+                    or "soulmv" in norm_line
+                    or "sistema de contabilidade" in norm_line
+                    or "uruacu" in norm_line
+                    or "hcn - hosp" in norm_line
+                    or "total do dia:" in norm_line
+                    or "total da empresa:" in norm_line
+                    or "total geral:" in norm_line
+                    or re.fullmatch(r"(?:-?\d{1,3}(?:\.\d{3})*,\d{2}\s*){1,3}", line_text.strip())
+                    or _SOULMV_CNPJ_RE.search(line_text)
+                    or "centro-norte goiano" in norm_line
+                ):
+                    continue
+
+            def is_amount(x1: float, text: str) -> bool:
+                return (
+                    _DIARIO_MONEY_RE.match(text) is not None
+                    and x1 >= columns["debit_right"] - 12.0
+                )
+
+            if is_movement_start:
                 if current is not None:
                     rows.extend(_finalise_diario_pdf(current))
 
                 lote = first_text
                 nr_mvto, conta_debito_codigo = split_mvto_and_account(texts[1])
                 debit_tokens = [conta_debito_codigo] if conta_debito_codigo else []
-                debit_tokens.extend(t for x, t in ordered if 100 <= x < 200)
-                credit_tokens = [t for x, t in ordered if 200 <= x < 309]
-                historico_words = [t for x, t in ordered if 309 <= x < 470]
-                amount_values = [
-                    (x, parse_money_value(t))
-                    for x, t in ordered
-                    if x >= 470 and parse_money_value(t) is not None
+                debit_tokens.extend(
+                    t for x0, x1, t in ordered[2:]
+                    if columns["debit_x"] <= x0 < columns["credit_x"]
+                )
+                credit_tokens = [
+                    t for x0, x1, t in ordered
+                    if columns["credit_x"] <= x0 < columns["hist_x"]
+                ]
+                historico_words = [
+                    t for x0, x1, t in ordered
+                    if x0 >= columns["hist_x"] and not is_amount(x1, t)
                 ]
 
                 debito = credito = None
-                if len(amount_values) >= 2:
-                    debito = amount_values[0][1]
-                    credito = amount_values[-1][1]
-                elif len(amount_values) == 1:
-                    amount = amount_values[0][1]
-                    if bool(debit_tokens) and not bool(credit_tokens):
-                        debito = amount
-                    elif bool(credit_tokens) and not bool(debit_tokens):
-                        credito = amount
-                    elif amount_values[0][0] >= 535:
-                        credito = amount
+                for x0, x1, t in ordered:
+                    if not is_amount(x1, t):
+                        continue
+                    value = parse_money_value(t)
+                    if x1 < columns["split_x"]:
+                        debito = value if debito is None else debito
                     else:
-                        debito = amount
+                        credito = value if credito is None else credito
 
                 current = {
                     "_lote": lote,
                     "_nr_mvto": nr_mvto,
+                    "_data": current_date,
                     "_conta_debito": " ".join(debit_tokens).strip(),
                     "_conta_credito": " ".join(credit_tokens).strip(),
                     "_historico": " ".join(historico_words).strip(),
@@ -372,13 +465,17 @@ def parse_diario_pdf(pdf) -> list[dict]:
             if "emitido por:" in norm_line:
                 continue
 
-            for x, text in ordered:
-                if 100 <= x < 200:
+            hist_line: list[str] = []
+            for x0, x1, text in ordered:
+                if columns["debit_x"] <= x0 < columns["credit_x"]:
                     current["_debito_desc"].append(text)
-                elif 200 <= x < 309:
+                elif columns["credit_x"] <= x0 < columns["hist_x"]:
                     current["_credito_desc"].append(text)
-                elif 309 <= x < 470:
-                    current["_historico_extra"].append(text)
+                elif x0 >= columns["hist_x"] and not is_amount(x1, text):
+                    hist_line.append(text)
+            if hist_line:
+                # Kept per printed line so a word broken at a hyphen can be rejoined.
+                current["_historico_extra"].append(" ".join(hist_line))
 
     if current is not None:
         rows.extend(_finalise_diario_pdf(current))
@@ -392,24 +489,26 @@ def _finalise_diario_pdf(c: dict) -> list[dict]:
     conta_credito = clean_diario_account(
         join_description(c["_conta_credito"], " ".join(c.pop("_credito_desc", [])))
     )
-    historico = join_description(
-        c["_historico"], " ".join(c.pop("_historico_extra", []))
+    historico = _join_wrapped_lines(
+        [c["_historico"], *c.pop("_historico_extra", [])]
     ) or "Sem historico"
+    mov = int(c["_nr_mvto"]) if str(c["_nr_mvto"]).isdigit() else None
 
     rows: list[dict] = []
     if conta_debito:
         code, name = split_account_field(conta_debito)
         rows.append({
-            "REG": 1600, "DATA": "", "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
+            "REG": 1600, "DATA": c["_data"], "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
             "HISTÓRICO": historico, "DÉBITO": decimal_to_float(c["_debito"]),
-            "CRÉDITO": 0.0 if c["_debito"] is not None else None, "Centro de Custos": None,
+            "CRÉDITO": 0.0 if c["_debito"] is not None else None,
+            "Centro de Custos": None, "Mov": mov,
         })
     if conta_credito:
         code, name = split_account_field(conta_credito)
         rows.append({
-            "REG": 1600, "DATA": "", "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
+            "REG": 1600, "DATA": c["_data"], "CLASSIFICAÇÃO": code, "DESCRIÇÃO": name,
             "HISTÓRICO": historico, "DÉBITO": None,
-            "CRÉDITO": decimal_to_float(c["_credito"]), "Centro de Custos": None,
+            "CRÉDITO": decimal_to_float(c["_credito"]), "Centro de Custos": None, "Mov": mov,
         })
     return rows
 
@@ -2130,7 +2229,17 @@ def extract_pdf_lines(page) -> list[tuple[float, list[tuple[float, str]]]]:
     return sorted(grouped.items(), key=lambda item: item[0])
 
 
+_DIARIO_ACCOUNT_CODE = r"\d\.\d\.\d\.\d{2}\.\d{2}\.\d{3}"
+_DIARIO_MVTO_ACCOUNT_RE = re.compile(rf"^(?P<mvto>\d+?)(?P<code>{_DIARIO_ACCOUNT_CODE})$")
+
+
 def split_mvto_and_account(value: str) -> tuple[str, str]:
+    # The Nr. Mvto column is right-aligned, so a short movement number ("1")
+    # ends up glued to the account code just like an 8-digit one does. The
+    # account code has a fixed shape, so split from its end.
+    m = _DIARIO_MVTO_ACCOUNT_RE.match(value)
+    if m:
+        return m.group("mvto"), m.group("code")
     m = re.match(r"^(\d{8})(.+)$", value)
     if m:
         return m.group(1), m.group(2)
@@ -2139,7 +2248,9 @@ def split_mvto_and_account(value: str) -> tuple[str, str]:
 
 def clean_diario_account(value: str) -> str:
     cleaned = normalize_spaces(value)
-    cleaned = re.sub(r"\s*-\s*", " - ", cleaned)
+    # Only the separator between the account code and its name is padded;
+    # hyphens inside the name ("580133738-1", "(-) CONTRATOS") are kept as printed.
+    cleaned = re.sub(r"^([\d.]+)\s*-\s*", r"\1 - ", cleaned)
     return normalize_spaces(cleaned)
 
 
