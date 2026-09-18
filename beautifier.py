@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import os
 import re
+import threading
 import unicodedata
 
 from openpyxl import Workbook, load_workbook
@@ -223,16 +224,29 @@ def _razao_sheet(rows: list[dict]) -> dict:
 
 # ── PDF page helpers ──────────────────────────────────────────────────────────
 
+_progress_local = threading.local()
+
+
+def set_progress_callback(callback) -> None:
+    """Register callback(done, total) for the current thread; None clears it."""
+    _progress_local.callback = callback
+
+
 def iter_pdf_pages(pdf):
     # pdfplumber keeps every Page in pdf.pages and caches all of its chars/
     # objects until the page is closed, so looping without releasing them
     # holds the whole document's layout in memory (a 98-page Razao peaked at
     # ~620 MB). Closing each page as soon as it is consumed keeps memory flat.
-    for page in pdf.pages:
+    pages = pdf.pages
+    total = len(pages)
+    for done, page in enumerate(pages, start=1):
         try:
             yield page
         finally:
             page.close()
+        callback = getattr(_progress_local, "callback", None)
+        if callback is not None:
+            callback(done, total)
 
 
 def parse_balancete_pdf(pdf) -> list[dict]:

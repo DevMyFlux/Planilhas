@@ -152,6 +152,73 @@ button:hover {
     border: 1px solid rgba(197, 65, 65, 0.15);
 }
 
+.job-panel {
+    margin-top: 24px;
+    padding: 20px 22px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid var(--line);
+}
+
+.job-panel.is-error {
+    background: rgba(255, 236, 236, 0.95);
+    border-color: rgba(197, 65, 65, 0.25);
+}
+
+.job-message {
+    margin: 0 0 12px;
+    font-weight: 600;
+}
+
+.job-detail {
+    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 0.95rem;
+}
+
+.job-detail:empty {
+    display: none;
+}
+
+.job-bar {
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(19, 34, 56, 0.08);
+    overflow: hidden;
+    position: relative;
+}
+
+.job-bar-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+    transition: width 400ms ease;
+}
+
+.job-bar.is-indeterminate .job-bar-fill {
+    width: 35%;
+    position: absolute;
+    animation: job-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes job-slide {
+    0% { left: -35%; }
+    100% { left: 100%; }
+}
+
+.job-download {
+    display: inline-block;
+    margin-top: 12px;
+    font-weight: 700;
+    color: var(--accent-dark);
+}
+
+[hidden] {
+    display: none !important;
+}
+
 @media (max-width: 820px) {
     .hero-card {
         padding: 28px;

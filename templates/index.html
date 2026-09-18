@@ -25,15 +25,115 @@
                 {% endif %}
             {% endwith %}
 
-            <form class="upload-card" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+            <form id="upload-form" class="upload-card" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
                 <label class="dropzone" for="file">
                     <span class="dropzone-title">Escolher arquivo PDF ou Excel</span>
                     <span class="dropzone-subtitle">Formatos aceitos: .pdf, .xls, .xlsx e .xlsm</span>
                     <input id="file" name="file" type="file" accept=".pdf,.xls,.xlsx,.xlsm" required>
                 </label>
-                <button type="submit">Organizar minha planilha</button>
+                <button id="submit-button" type="submit">Organizar minha planilha</button>
             </form>
+
+            <div id="job-panel" class="job-panel" hidden aria-live="polite">
+                <p id="job-message" class="job-message"></p>
+                <div id="job-bar" class="job-bar"><span id="job-bar-fill" class="job-bar-fill"></span></div>
+                <p id="job-detail" class="job-detail"></p>
+                <a id="job-download" class="job-download" href="#" hidden>Baixar planilha</a>
+            </div>
         </section>
     </main>
+
+    <script>
+    (function () {
+        var form = document.getElementById("upload-form");
+        var button = document.getElementById("submit-button");
+        var panel = document.getElementById("job-panel");
+        var message = document.getElementById("job-message");
+        var bar = document.getElementById("job-bar");
+        var fill = document.getElementById("job-bar-fill");
+        var detail = document.getElementById("job-detail");
+        var download = document.getElementById("job-download");
+        var POLL_MS = 2000;
+        var MAX_FAILED_POLLS = 15;
+
+        function show(text, opts) {
+            opts = opts || {};
+            panel.hidden = false;
+            panel.classList.toggle("is-error", !!opts.error);
+            message.textContent = text;
+            detail.textContent = opts.detail || "";
+            bar.hidden = !!opts.error || !!opts.done;
+            bar.classList.toggle("is-indeterminate", opts.progress == null);
+            fill.style.width = opts.progress == null ? "" : opts.progress + "%";
+        }
+
+        function finish() {
+            button.disabled = false;
+        }
+
+        function fail(text) {
+            show(text, { error: true });
+            finish();
+        }
+
+        function poll(statusUrl, failed) {
+            fetch(statusUrl, { headers: { Accept: "application/json" } })
+                .then(function (resp) {
+                    return resp.json().then(function (data) {
+                        return { ok: resp.ok, data: data };
+                    });
+                })
+                .then(function (result) {
+                    var data = result.data;
+                    if (data.status === "error") {
+                        return fail(data.message || "Nao foi possivel converter esse arquivo.");
+                    }
+                    if (data.status === "done") {
+                        show("Pronto! Sua planilha foi organizada.", { done: true });
+                        download.href = data.download_url;
+                        download.hidden = false;
+                        window.location.href = data.download_url;
+                        return finish();
+                    }
+                    show(
+                        data.status === "queued" ? "Aguardando na fila..." : "Organizando sua planilha...",
+                        { progress: data.progress, detail: data.detail }
+                    );
+                    setTimeout(function () { poll(statusUrl, 0); }, POLL_MS);
+                })
+                .catch(function () {
+                    if (failed + 1 >= MAX_FAILED_POLLS) {
+                        return fail("Perdi a conexao com o servidor. Tente enviar o arquivo novamente.");
+                    }
+                    setTimeout(function () { poll(statusUrl, failed + 1); }, POLL_MS);
+                });
+        }
+
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            download.hidden = true;
+            button.disabled = true;
+            show("Enviando arquivo...", { progress: null });
+
+            fetch(form.action, { method: "POST", body: new FormData(form), headers: { Accept: "application/json" } })
+                .then(function (resp) {
+                    return resp.json().then(function (data) {
+                        return { ok: resp.ok, data: data };
+                    }, function () {
+                        return { ok: false, data: {} };
+                    });
+                })
+                .then(function (result) {
+                    if (!result.ok) {
+                        return fail(result.data.error || "Nao foi possivel enviar o arquivo.");
+                    }
+                    poll(result.data.status_url, 0);
+                })
+                .catch(function () {
+                    fail("Nao foi possivel enviar o arquivo. Verifique sua conexao e tente novamente.");
+                });
+        });
+    })();
+    </script>
 </body>
 </html>
