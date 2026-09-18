@@ -7,10 +7,24 @@ import multiprocessing
 bind = "0.0.0.0:5000"
 
 # ── Workers ───────────────────────────────────────────────────────────────────
-# Spreadsheet processing is CPU-bound; use (2 × cores + 1) as a starting point
-# but cap at 4 to stay within the 1 GB memory budget.
-workers = min(multiprocessing.cpu_count() * 2 + 1, 4)
+# A single worker processing one of the larger SOULMV Razao exports (tens of
+# thousands of raw rows) peaks around 225-240 MB RSS while building the row
+# list and the styled output workbook (measured locally on the ~115k-row HCN
+# file; matches the ~240 MB reported in production before crashes started).
+# It settles back to a low resting baseline once the request finishes - this
+# is not a per-request leak that accumulates over a worker's life - but that
+# per-request PEAK is real and transient. At 4 workers, two or more big-file
+# uploads landing on different workers at the same time is enough to push
+# combined RSS past the 1 GB service limit and get OOM-killed. Capping at 2
+# keeps the worst realistic case (2 workers both mid-peak) around ~500 MB,
+# with real headroom.
+workers = min(multiprocessing.cpu_count() * 2 + 1, 2)
 worker_class = "sync"
+
+# Load the app (and its heavy imports - openpyxl, pdfplumber, etc, ~35-60 MB)
+# once in the master process before forking, so workers share those pages via
+# copy-on-write instead of each paying that baseline separately.
+preload_app = True
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
 # Large spreadsheets can take a while to process; give each request 120 s.
