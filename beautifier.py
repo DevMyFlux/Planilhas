@@ -183,7 +183,9 @@ def parse_pdf_documents(file_stream: BytesIO) -> list[tuple[str, dict]]:
                 return [("DiarioPDF", _diario_sheet(rows))]
 
         if "razao contabil" in norm or "razao" in norm:
-            rows = parse_razao_pdf(pdf)
+            rows = parse_soulmv_razao_pdf(pdf) if "soulmv" in norm else []
+            if not rows:
+                rows = parse_razao_pdf(pdf)
             if rows:
                 return [("RazaoPDF", _razao_sheet(rows))]
 
@@ -468,6 +470,152 @@ def parse_razao_pdf(pdf) -> list[dict]:
                 extra = line.strip()
                 if extra and normalize_text(pending_record["HISTÓRICO"]) in {"", "sem historico"}:
                     pending_record["HISTÓRICO"] = extra
+    return rows
+
+
+_PDF_MONEY = r"-?\d{1,3}(?:\.\d{3})*,\d{2}-?"
+_PDF_TXN_RE = re.compile(
+    rf"^(?:(?P<date>\d{{2}}/\d{{2}}/\d{{4}})\s+)?"
+    # Optional "Conta Auxiliar" code (e.g. a supplier id) before the amounts;
+    # it must not itself look like an amount.
+    rf"(?:(?!{_PDF_MONEY}\s)\S+\s+)?"
+    rf"(?P<debito>{_PDF_MONEY})\s+(?P<credito>{_PDF_MONEY})\s+(?P<saldo>{_PDF_MONEY})"
+    rf"(?:\s+(?P<rest>.*))?$"
+)
+_PDF_CONTRA_RE = re.compile(r"^Contrapartida:\s*\d+\s*-\s*(?P<code>[\d.]+)")
+_PDF_ACCOUNT_SALDO_RE = re.compile(r"Saldo Anterior:\s*(?P<saldo>" + _PDF_MONEY + ")")
+
+
+def _join_wrapped_lines(lines: list[str]) -> str:
+    # A printed line that ends in a hyphen glued to a word ("D-") was broken
+    # inside a token ("D-" + "81" = "D-81"), so it is joined without a space.
+    # A spaced hyphen ("RAYSSA -") is a real separator and keeps its space.
+    text = ""
+    for line in lines:
+        if text and not (text.endswith("-") and len(text) > 1 and text[-2] != " "):
+            text += " "
+        text += line
+    return normalize_spaces(text)
+
+
+def parse_soulmv_razao_pdf(pdf) -> list[dict]:
+    """Parse the SOULMV 'Razão Contábil' printed as PDF.
+
+    Layout (one printed line each): a value line `[DATA] DÉBITO CRÉDITO SALDO
+    HISTÓRICO...` (the date is printed only on the first entry of each day, and
+    long históricos wrap onto extra lines), followed by one or more
+    `Contrapartida: SEQ - CODE ...` lines. The Contrapartida block repeats the
+    historico in a narrower column, so wrapped lines that merely restate the
+    start of the historico are dropped instead of being appended to it. Every
+    page reprints the report header, the account header and the column titles;
+    a repeat of the current account must not reset the account context.
+    """
+    rows: list[dict] = []
+    account_code = ""
+    account_name = ""
+    saldo_anterior: Decimal | None = None
+    current_date = ""
+    txn: dict | None = None
+    hist_lines: list[str] = []
+    collecting_hist = False
+    after_account_total = False
+
+    def flush() -> None:
+        nonlocal txn, hist_lines, collecting_hist
+        if txn is not None:
+            txn["HISTÓRICO"] = _join_wrapped_lines(hist_lines) or "Sem historico"
+            txn["Contra Partida"] = "; ".join(txn.pop("_contras"))
+            rows.append(txn)
+        txn = None
+        hist_lines = []
+        collecting_hist = False
+
+    for page in iter_pdf_pages(pdf):
+        lines = [normalize_spaces(l) for l in (page.extract_text() or "").splitlines()]
+        lines = [l for l in lines if l]
+        in_page_header = True
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            index += 1
+
+            if line.startswith("Conta Anal"):
+                # A long account name can wrap, pushing "Saldo Anterior:" down.
+                while "Saldo Anterior:" not in line and index < len(lines) and index < 40:
+                    line = f"{line} {lines[index]}"
+                    index += 1
+                saldo_match = _PDF_ACCOUNT_SALDO_RE.search(line)
+                account_text = re.sub(r"^Conta Anal\S*:\s*", "", line)
+                account_text = re.sub(r"\s*Saldo Anterior:.*$", "", account_text)
+                new_code, new_name = parse_razao_account_header(account_text)
+                if new_code and new_code != account_code:
+                    flush()
+                    saldo_anterior = (
+                        _soulmv_parse_money(saldo_match.group("saldo")) if saldo_match else None
+                    )
+                    account_code, account_name = new_code, new_name
+                    current_date = ""
+                after_account_total = False
+                continue
+
+            if line.startswith("Data ") and "Hist" in line:
+                in_page_header = False
+                continue
+            if in_page_header:
+                txn_probe = _PDF_TXN_RE.match(line)
+                if txn_probe is None:
+                    continue
+                in_page_header = False
+
+            if _soulmv_is_boilerplate_line(line) or line.startswith("SOULMV"):
+                continue
+
+            if "<<==" in line:
+                flush()
+                after_account_total = True
+                continue
+
+            match = _PDF_TXN_RE.match(line)
+            if match is not None:
+                flush()
+                after_account_total = False
+                if match.group("date"):
+                    current_date = match.group("date")
+                txn = {
+                    "REG": 1700,
+                    "NOME CONTA": account_name or "Sem conta",
+                    "CONTA CONTÁBIL": account_code,
+                    "SALDO ANTERIOR": decimal_to_float(saldo_anterior),
+                    "DATA": current_date,
+                    "HISTÓRICO": "",
+                    "DÉBITO": decimal_to_float(_soulmv_parse_money(match.group("debito"))),
+                    "CRÉDITO": decimal_to_float(_soulmv_parse_money(match.group("credito"))),
+                    "Saldo": decimal_to_float(_soulmv_parse_money(match.group("saldo"))),
+                    "Contra Partida": "",
+                    "Centro de Custos": None,
+                    "_contras": [],
+                }
+                hist_lines = [match.group("rest")] if match.group("rest") else []
+                collecting_hist = True
+                continue
+
+            contra = _PDF_CONTRA_RE.match(line)
+            if contra is not None:
+                if txn is not None:
+                    txn["_contras"].append(contra.group("code"))
+                collecting_hist = False
+                continue
+
+            if after_account_total or txn is None or not collecting_hist:
+                continue
+            # Still inside the wrapped historico - unless this line is the
+            # first line of the narrower copy printed around "Contrapartida:".
+            if hist_lines and _join_wrapped_lines(hist_lines).startswith(line):
+                collecting_hist = False
+                continue
+            hist_lines.append(line)
+
+    flush()
     return rows
 
 
